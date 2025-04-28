@@ -1,0 +1,16 @@
+name: snowsar
+channels:
+  - conda-forge
+dependencies:
+  - rasterio
+  - shapely
+  - geopandas
+  - contextily
+  - leafmap
+  - mintpy
+  - libgdal-hdf5
+  - pip
+  - pip:
+      - ulmo
+      - "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
+
