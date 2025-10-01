@@ -9,6 +9,7 @@ dependencies:
   - leafmap
   - mintpy
   - libgdal-hdf5
+  - nb_conda_kernels
   - pip
   - pip:
       - ulmo
