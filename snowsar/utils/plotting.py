@@ -10,6 +10,7 @@ import pandas as pd
 
 def plot_snotel_data(
     results: Dict[str, pd.DataFrame],
+    reference_date: pd.Timestamp,
     dates: List,
     *,
     x_axis: str = "days_since_reference",  # notebook default
@@ -32,7 +33,8 @@ def plot_snotel_data(
         raise ValueError("results is empty")
 
     dates = pd.to_datetime(dates).normalize()
-    reference_date = dates.min()
+    reference_year = pd.to_datetime(dates.min()).year
+    reference_date = pd.to_datetime(f"{reference_year}-{reference_date}")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
