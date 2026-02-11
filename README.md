@@ -13,13 +13,16 @@ This repository requires a Conda environment with specific geospatial libraries 
 To create a new Conda environment named `snowsar` and install the required packages:
 
 ```bash
-conda env create -f environment.yml
+git clone git@github.com:ehavazli/snowsar.git
+conda env create -f environment.yml;
+pip install -e .
 ```
 
 Alternatively, to create it manually:
 
 ```bash
-conda create -n snowsar rasterio shapely geopandas contextily leafmap mintpy libgdal-hdf5 pip
+git clone git@github.com:ehavazli/snowsar.git
+conda create -n snowsar rasterio sardem shapely geopandas contextily leafmap mintpy libgdal-hdf5 pip
 conda activate snowsar
 ```
 
@@ -34,7 +37,7 @@ pip install ulmo "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel
 If you already have the `snowsar` environment, you can install missing packages manually:
 
 ```bash
-conda install rasterio shapely geopandas contextily leafmap libgdal-hdf5
+conda install rasterio sardem shapely geopandas contextily leafmap libgdal-hdf5
 pip install ulmo "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
 ```
 
