@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snowsar"
+version = "0.1.0"
+description = "Snow Water Equivalent estimation using InSAR (SNOTEL, HyP3, MintPy, NISAR)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Emre Havazli" }]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["snowsar*"]
+exclude = ["notebooks*"]
