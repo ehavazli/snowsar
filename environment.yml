@@ -2,16 +2,32 @@ name: snowsar
 channels:
   - conda-forge
 dependencies:
+  - python>=3.10
+  - numpy
+  - pandas
+
+  # Geo stack (conda-forge is the right place for these)
+  - gdal
   - rasterio
+  - sardem
   - shapely
   - geopandas
+
+  # MintPy + HDF5 reading
+  - mintpy
+  - h5py
+  - libgdal-hdf5
+
+  # Mapping / notebooks
   - contextily
   - leafmap
-  - mintpy
-  - libgdal-hdf5
+  - folium
+  - matplotlib
+  - jupyterlab
   - nb_conda_kernels
+
   - pip
   - pip:
       - ulmo
       - "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
-
+      - -e .
