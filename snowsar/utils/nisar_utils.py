@@ -75,14 +75,56 @@ def gunw_ionosphere_phase_screen_path(
 # -----------------------------
 # Dates
 # -----------------------------
-def _get_date_pairs(filenames):
-    str_list = [Path(f).stem for f in filenames]
-    dates = [
-        str(f.split("_")[12].split("T")[0])
-        + "_"
-        + str(f.split("_")[13].split("T")[0])
-        for f in str_list
-    ]
+def nisar_dates_from_gunw_h5(
+    gunw_h5: Union[str, Path],
+) -> List[pd.Timestamp]:
+    """
+    Return [reference_date, secondary_date] from identification times, normalized.
+    Uses:
+      science/LSAR/identification/referenceZeroDopplerStartTime
+      science/LSAR/identification/secondaryZeroDopplerStartTime
+    """
+    gunw_h5 = Path(gunw_h5)
+    try:
+        import h5py
+    except Exception as e:
+        raise ImportError(
+            "h5py is required to read NISAR GUNW HDF5 files."
+        ) from e
+
+    def _read_str(ds) -> str:
+        val = ds[()]
+        if isinstance(val, bytes):
+            return val.decode("utf-8", errors="ignore")
+        if isinstance(val, np.ndarray) and val.dtype.kind in {"S", "O"}:
+            # scalar array-of-bytes / object
+            v0 = val.item()
+            return (
+                v0.decode("utf-8", errors="ignore")
+                if isinstance(v0, bytes)
+                else str(v0)
+            )
+        return str(val)
+
+    ref_path = "science/LSAR/identification/referenceZeroDopplerStartTime"
+    sec_path = "science/LSAR/identification/secondaryZeroDopplerStartTime"
+    with h5py.File(gunw_h5, "r") as f:
+        if ref_path not in f or sec_path not in f:
+            raise ValueError(
+                f"Missing identification time datasets in {gunw_h5.name}. "
+                f"Expected: {ref_path} and {sec_path}"
+            )
+        ref_str = _read_str(f[ref_path])
+        sec_str = _read_str(f[sec_path])
+    # Normalize to midnight to match your ctx convention
+    ref_dt = pd.to_datetime(ref_str, errors="coerce")
+    sec_dt = pd.to_datetime(sec_str, errors="coerce")
+    if pd.isna(ref_dt) or pd.isna(sec_dt):
+        raise ValueError(
+            f"Could not parse reference/secondary times from file: {gunw_h5.name}\n"
+            f"ref='{ref_str}' sec='{sec_str}'"
+        )
+    dates = sorted({ref_dt.normalize(), sec_dt.normalize()})
     return dates
 
 
