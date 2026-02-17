@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import logging
+import posixpath
+import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import geopandas as gpd
+import h5py
 import numpy as np
 import pandas as pd
 from rasterio.features import shapes
@@ -15,6 +19,72 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------
+# HDF5 path resolution helpers
+# -----------------------------
+def _h5_exists(f: Union[h5py.File, h5py.Group], path: str) -> bool:
+    try:
+        f[path]
+        return True
+    except KeyError:
+        return False
+
+
+def resolve_h5_path(
+    f: Union[h5py.File, h5py.Group],
+    path: str,
+    *,
+    extra_candidates: Optional[Sequence[str]] = None,
+) -> str:
+    """Resolve an HDF5 dataset/group path robustly.
+
+    NISAR GUNW files are sometimes addressed with and without a leading '/'
+    (e.g., '/science/LSAR/...' vs 'science/LSAR/...'). This helper tries both
+    forms (plus any extra candidates) and returns the first that exists.
+
+    Raises
+    ------
+    KeyError
+        If none of the candidate paths exist.
+    """
+    p = posixpath.normpath(path.strip())
+
+    candidates: List[str] = []
+    if p.startswith("/"):
+        candidates.extend([p, p.lstrip("/")])
+    else:
+        candidates.extend(["/" + p, p])
+
+    if extra_candidates:
+        candidates.extend(
+            [posixpath.normpath(c.strip()) for c in extra_candidates]
+        )
+
+    # Deduplicate while preserving order
+    seen = set()
+    uniq: List[str] = []
+    for c in candidates:
+        if c not in seen:
+            uniq.append(c)
+            seen.add(c)
+
+    for c in uniq:
+        if _h5_exists(f, c):
+            return c
+
+    top_keys = list(f.keys())[:30]
+    raise KeyError(
+        f"HDF5 path not found. Tried: {uniq}. Top-level keys: {top_keys}"
+    )
+
+
+def h5_get(
+    f: Union[h5py.File, h5py.Group], path: str
+) -> Union[h5py.Dataset, h5py.Group]:
+    """Convenience wrapper returning the dataset/group at a resolved path."""
+    return f[resolve_h5_path(f, path)]
 
 
 # -----------------------------
@@ -85,19 +155,12 @@ def nisar_dates_from_gunw_h5(
       science/LSAR/identification/secondaryZeroDopplerStartTime
     """
     gunw_h5 = Path(gunw_h5)
-    try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
 
     def _read_str(ds) -> str:
         val = ds[()]
         if isinstance(val, bytes):
             return val.decode("utf-8", errors="ignore")
         if isinstance(val, np.ndarray) and val.dtype.kind in {"S", "O"}:
-            # scalar array-of-bytes / object
             v0 = val.item()
             return (
                 v0.decode("utf-8", errors="ignore")
@@ -109,14 +172,17 @@ def nisar_dates_from_gunw_h5(
     ref_path = "science/LSAR/identification/referenceZeroDopplerStartTime"
     sec_path = "science/LSAR/identification/secondaryZeroDopplerStartTime"
     with h5py.File(gunw_h5, "r") as f:
-        if ref_path not in f or sec_path not in f:
+        try:
+            ref_p = resolve_h5_path(f, ref_path)
+            sec_p = resolve_h5_path(f, sec_path)
+        except KeyError as e:
             raise ValueError(
                 f"Missing identification time datasets in {gunw_h5.name}. "
                 f"Expected: {ref_path} and {sec_path}"
-            )
-        ref_str = _read_str(f[ref_path])
-        sec_str = _read_str(f[sec_path])
-    # Normalize to midnight to match your ctx convention
+            ) from e
+        ref_str = _read_str(f[ref_p])
+        sec_str = _read_str(f[sec_p])
+
     ref_dt = pd.to_datetime(ref_str, errors="coerce")
     sec_dt = pd.to_datetime(sec_str, errors="coerce")
     if pd.isna(ref_dt) or pd.isna(sec_dt):
@@ -146,53 +212,28 @@ def nisar_footprint_from_gunw_h5(
     - Builds a finite-pixel mask (excluding fill values if present)
     - Polygonizes mask via rasterio.features.shapes
     - Unions polygons and returns GeoDataFrame reprojected to crs_out
-    Parameters
-    ----------
-    gunw_h5 : path
-        NISAR L2 GUNW HDF5 file.
-    raster_path : str, optional
-        Full HDF5 dataset path for the raster. If None, uses unwrappedPhase path
-        derived from (frequency, pol).
-    frequency : str
-        "A" / "B" (used only if raster_path is None)
-    pol : str
-        "HH", "HV", etc (used only if raster_path is None)
-    crs_out : str
-        Output CRS (default EPSG:4326)
-    min_hole_area : float
-        If >0, remove holes smaller than this area (in source CRS units^2).
-    Returns
-    -------
-    gpd.GeoDataFrame
-        Single-row GeoDataFrame with footprint geometry.
     """
     gunw_h5 = Path(gunw_h5)
     raster_path = raster_path or gunw_unwrapped_phase_path(
         frequency=frequency, pol=pol
     )
-    try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
+
     with h5py.File(gunw_h5, "r") as f:
-        if raster_path not in f:
+        try:
+            rp = resolve_h5_path(f, raster_path)
+        except KeyError as e:
             raise ValueError(
                 f"Raster dataset not found in {gunw_h5.name}:\n  {raster_path}"
-            )
-        ds = f[raster_path]
+            ) from e
+        ds = f[rp]
         arr = ds[()]  # numpy array
-        # Parent group holds x/y coords + projection
         grp = ds.parent
-        # Required grids
         if "xCoordinates" not in grp or "yCoordinates" not in grp:
             raise ValueError(
                 f"Missing xCoordinates/yCoordinates near raster path:\n  {raster_path}"
             )
         x = np.array(grp["xCoordinates"][()])
         y = np.array(grp["yCoordinates"][()])
-        # Spacing (prefer explicit datasets, else infer)
         if "xCoordinateSpacing" in grp:
             dx = float(np.array(grp["xCoordinateSpacing"][()]).item())
         else:
@@ -201,7 +242,6 @@ def nisar_footprint_from_gunw_h5(
             dy = float(np.array(grp["yCoordinateSpacing"][()]).item())
         else:
             dy = float(y[1] - y[0])
-        # Projection EPSG code (your sample stores integer like 32611)
         epsg = None
         if "projection" in grp:
             try:
@@ -209,7 +249,6 @@ def nisar_footprint_from_gunw_h5(
             except Exception:
                 epsg = None
         crs_src = f"EPSG:{epsg}" if epsg else None
-        # Build mask: finite & not fill value
         mask = np.isfinite(arr)
         fill = ds.attrs.get("_FillValue", None)
         if fill is not None:
@@ -218,16 +257,13 @@ def nisar_footprint_from_gunw_h5(
                 mask &= arr != fill_val
             except Exception:
                 pass
-    # If x,y look like pixel centers, adjust half-pixel to get top-left corner
-    # Use absolute resolution for rasterio transform
+
     res_x = abs(dx)
     res_y = abs(dy)
     west = float(np.min(x) - res_x / 2.0)
-    east = float(np.max(x) + res_x / 2.0)
-    south = float(np.min(y) - res_y / 2.0)
     north = float(np.max(y) + res_y / 2.0)
     transform = from_origin(west, north, res_x, res_y)
-    # Polygonize valid area
+
     mask_u8 = mask.astype(np.uint8)
     polys = []
     for geom, val in shapes(
@@ -236,7 +272,6 @@ def nisar_footprint_from_gunw_h5(
         if val != 1:
             continue
         p = shape(geom)
-        # Optional hole filtering, similar to your HyP3 version
         if (
             min_hole_area > 0
             and hasattr(p, "interiors")
@@ -249,16 +284,15 @@ def nisar_footprint_from_gunw_h5(
                     kept_holes.append(interior)
             p = Polygon(p.exterior.coords, holes=kept_holes)
         polys.append(p)
+
     if not polys:
-        # Return empty in the expected CRS
         return gpd.GeoDataFrame(geometry=[], crs=crs_out)
+
     merged = unary_union(polys)
     gdf = gpd.GeoDataFrame(geometry=[merged], crs=crs_src)
-    # Reproject to EPSG:4326 (or whatever requested)
     if crs_out and gdf.crs is not None:
         gdf = gdf.to_crs(crs_out)
     elif crs_out and gdf.crs is None:
-        # If projection missing, assume already lon/lat (rare for GUNW grids)
         gdf = gdf.set_crs(crs_out)
     return gdf
 
@@ -276,9 +310,9 @@ def nisar_union_footprints(
     Convenience: union footprints across multiple GUNW files.
     """
     geoms = []
-    for f in gunw_files:
+    for f_ in gunw_files:
         gdf = nisar_footprint_from_gunw_h5(
-            f,
+            f_,
             raster_path=raster_path,
             frequency=frequency,
             pol=pol,
@@ -302,15 +336,7 @@ def _gunw_date_tokens_from_filename(
 ) -> Tuple[str, str, str, str]:
     """
     Parse reference/secondary date tokens from a NISAR GUNW filename.
-    You specified:
-      - split by "_"
-      - dates are in blocks 11 and 13
-    Example:
-      NISAR_L2_PR_GUNW_..._SH_20081012T060911_20081012T060925_20081127T061000_...h5
-                               ^ block 11                 ^ block 13
-    Returns
-    -------
-    (ref_date, sec_date) strings exactly as in filename (e.g., "20081012T060911", "20081127T061000")
+    Returns (ref_date, sec_date, track, frame) as strings.
     """
     p = Path(gunw_h5)
     parts = p.stem.split("_")
@@ -320,9 +346,7 @@ def _gunw_date_tokens_from_filename(
             f"  {p.name}\n"
             f"  n_blocks={len(parts)}"
         )
-    ref_date = parts[ref_block].split("T")[
-        0
-    ]  # keep only date part (drop time)
+    ref_date = parts[ref_block].split("T")[0]
     sec_date = parts[sec_block].split("T")[0]
     track = parts[track_block]
     frame = parts[frame_block]
@@ -332,9 +356,6 @@ def _gunw_date_tokens_from_filename(
 def _format_outname(
     gunw_h5: Union[str, Path],
     layer_name: str,
-    *,
-    track: int = 5,
-    frame: int = 7,
 ) -> str:
     ref_date, sec_date, track, frame = _gunw_date_tokens_from_filename(
         gunw_h5
@@ -342,6 +363,168 @@ def _format_outname(
     return f"{ref_date}_{sec_date}_{layer_name}_T{track}_F{frame}.tif"
 
 
+# -----------------------------
+# Dataset discovery / routing
+# -----------------------------
+@dataclass(frozen=True)
+class DatasetInfo:
+    """Lightweight index entry for an HDF5 dataset."""
+
+    path: str
+    name: str
+    ndim: int
+    shape: Tuple[int, ...]
+    parent_path: str
+
+
+def build_dataset_index(f: h5py.File) -> Dict[str, List[DatasetInfo]]:
+    """Build an index: dataset basename -> list of candidates across the file."""
+    out: Dict[str, List[DatasetInfo]] = {}
+
+    def _visitor(name: str, obj) -> None:
+        if not isinstance(obj, h5py.Dataset):
+            return
+        base = name.split("/")[-1]
+        parent = "/".join(name.split("/")[:-1])
+        full_path = ("/" + name) if not name.startswith("/") else name
+        parent_path = (
+            ("/" + parent)
+            if (parent and not parent.startswith("/"))
+            else ("/" if not parent else parent)
+        )
+        info = DatasetInfo(
+            path=full_path,
+            name=base,
+            ndim=obj.ndim,
+            shape=tuple(obj.shape),
+            parent_path=parent_path,
+        )
+        out.setdefault(base, []).append(info)
+
+    f.visititems(_visitor)
+    return out
+
+
+def pick_best_candidate(
+    candidates: List[DatasetInfo],
+    *,
+    frequency: str,
+    pol: str,
+    prefer_geogrid: bool = True,
+) -> DatasetInfo:
+    """Pick the best dataset match among multiple candidates.
+
+    Preference order (roughly):
+    1) 2D geogrid datasets under /grids/ (if prefer_geogrid=True)
+    2) matching frequency{A/B}
+    3) matching polarization folder
+    4) radarGrid cubes under /metadata/radarGrid/ (as fallback)
+    """
+    freq = f"frequency{frequency.upper()}"
+    pol_u = pol.upper()
+
+    def score(c: DatasetInfo) -> int:
+        p = c.path
+        s = 0
+        if prefer_geogrid and "/grids/" in p and c.ndim == 2:
+            s += 100
+        if f"/{freq}/" in p:
+            s += 30
+        if f"/{pol_u}/" in p:
+            s += 25
+        if "/metadata/radarGrid/" in p and c.ndim == 3:
+            s += 20
+        if "/unwrappedInterferogram/" in p:
+            s += 5
+        return s
+
+    return sorted(candidates, key=score, reverse=True)[0]
+
+
+def is_geogrid_2d(f: h5py.File, info: DatasetInfo) -> bool:
+    if info.ndim != 2:
+        return False
+    try:
+        parent = h5_get(f, info.parent_path)
+    except KeyError:
+        return False
+    return (
+        isinstance(parent, h5py.Group)
+        and ("xCoordinates" in parent)
+        and ("yCoordinates" in parent)
+    )
+
+
+def is_radargrid_cube(f: h5py.File, info: DatasetInfo) -> bool:
+    if info.ndim != 3:
+        return False
+    if "/metadata/radarGrid/" in info.path:
+        return True
+    try:
+        parent = h5_get(f, info.parent_path)
+    except KeyError:
+        return False
+    return isinstance(parent, h5py.Group) and (
+        ("xCoordinates" in parent or "yCoordinates" in parent)
+        and ("heightAboveEllipsoid" in parent or "zCoordinates" in parent)
+    )
+
+
+def resolve_layer_requests_for_file(
+    f: h5py.File,
+    *,
+    requested: Union[str, Sequence[str]],
+    frequency: str,
+    pol: str,
+    prefer_geogrid: bool = True,
+) -> List[DatasetInfo]:
+    """Resolve requested layer names to concrete dataset paths within this file.
+
+    If requested == 'all' (case-insensitive), returns all 2D geogrid datasets that match
+    the frequency/pol preference ranking (i.e., picks one best candidate per basename).
+    """
+    idx = build_dataset_index(f)
+
+    if isinstance(requested, str) and requested.lower() == "all":
+        picked: List[DatasetInfo] = []
+        for name, cands in idx.items():
+            best = pick_best_candidate(
+                cands,
+                frequency=frequency,
+                pol=pol,
+                prefer_geogrid=prefer_geogrid,
+            )
+            if is_geogrid_2d(f, best):
+                picked.append(best)
+        return sorted(picked, key=lambda d: d.name)
+
+    if isinstance(requested, str):
+        requested_names = [requested]
+    else:
+        requested_names = list(requested)
+
+    out: List[DatasetInfo] = []
+    missing: List[str] = []
+    for name in requested_names:
+        if name in idx:
+            best = pick_best_candidate(
+                idx[name],
+                frequency=frequency,
+                pol=pol,
+                prefer_geogrid=prefer_geogrid,
+            )
+            out.append(best)
+        else:
+            missing.append(name)
+
+    if missing:
+        raise ValueError(f"Layer(s) not found in file: {missing}")
+    return out
+
+
+# -----------------------------
+# Batch extraction
+# -----------------------------
 def extract_gunw_layers_to_geotiff_batch(
     gunw_dir: Union[str, Path],
     pattern: str,
@@ -349,170 +532,196 @@ def extract_gunw_layers_to_geotiff_batch(
     *,
     frequency: str = "A",
     pol: str = "HH",
-    layers: Sequence[str] = (
+    layers: Union[str, Sequence[str]] = (
         "unwrappedPhase",
         "coherenceMagnitude",
         "ionospherePhaseScreen",
         "connectedComponents",
     ),
     warp: bool = True,
-    dst_epsg: Optional[int] = 4326,
-    dst_res: Optional[Tuple[float, float]] = None,
+    dst_epsg: Optional[int] = None,
+    dst_res: Optional[float] = None,
     resampling: str = "nearest",
     overwrite: bool = False,
+    dem_dir: Optional[Union[str, Path]] = None,
+    dem_precision: int = 2,
 ) -> Dict[Path, Dict[str, Path]]:
-    """
-    Batch extractor for NISAR GUNW GeoTIFF exports.
+    """Extract arbitrary layer names from NISAR GUNW HDF5 to GeoTIFFs.
 
-    Supported layer names
-    ---------------------
-    Geogrid (2D, non-interpolated):
-      - unwrappedPhase
-      - coherenceMagnitude
-      - ionospherePhaseScreen
-      - connectedComponents
-
-    RadarGrid cubes (exported in BOTH forms):
-      - incidenceAngle
-      - totalTroposphere  (computed as hydrostatic + wet tropospheric phase screen in radarGrid space)
-
-    For any requested RadarGrid cube, this function writes an interpolated cube→geogrid GeoTIFF using an on-the-fly (cached) DEM: <name>_interp
-
-    Returns
-    -------
-    Dict[Path, Dict[str, Path]]
-        Mapping: input GUNW file -> {output_label -> GeoTIFF path}
+    - Prefers 2D geogrid datasets when both geogrid (2D) and radarGrid (3D cube) exist.
+    - If a requested layer is only available as a radarGrid cube, it is interpolated to geogrid
+      using DEM and exported (suffix *_interp).
+    - Computed aliases:
+        * totalTroposphere = hydrostaticTroposphericPhaseScreen + wetTroposphericPhaseScreen (radarGrid cubes)
+        * localIncidenceAngle derived from DEM surface normal and LOS unit vectors (radarGrid cubes)
+    - When warp=True, all outputs are reprojected onto a single per-file template grid derived from
+      unwrappedPhase (or first available geogrid 2D dataset).
     """
     gunw_dir = Path(gunw_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    gunw_geogrid_group = (
-        "unwrappedInterferogram"  # default geogrid group for x/y/projection
-    )
     files = sorted(gunw_dir.glob(pattern))
     if not files:
-        raise FileNotFoundError(f"No files matched: {gunw_dir}/{pattern}")
-
-    # Import here so module import doesn't hard-require dependencies unless used
-    try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
+        raise ValueError(f"No files found: {gunw_dir}/{pattern}")
 
     try:
         import rasterio
         from rasterio.crs import CRS
-        from rasterio.transform import from_origin
-        from rasterio.warp import (
-            Resampling,
-            calculate_default_transform,
-            reproject,
-        )
+        from rasterio.enums import Resampling
+        from rasterio.warp import calculate_default_transform, reproject
     except Exception as e:
         raise ImportError(
-            "rasterio is required to write/warp GeoTIFF outputs."
+            "rasterio is required for GeoTIFF export/warp."
         ) from e
 
-    if warp and dst_epsg is None:
-        raise ValueError("dst_epsg must be provided when warp=True")
-
-    # 2D geogrid layer path builders
-    layer_to_path = {
-        "unwrappedPhase": gunw_unwrapped_phase_path(
-            frequency=frequency, pol=pol
-        ),
-        "coherenceMagnitude": gunw_coherence_magnitude_path(
-            frequency=frequency, pol=pol
-        ),
-        "ionospherePhaseScreen": gunw_ionosphere_phase_screen_path(
-            frequency=frequency, pol=pol
-        ),
-        "connectedComponents": gunw_connected_components_path(
-            frequency=frequency, pol=pol
-        ),
+    resamp_map = {
+        "nearest": Resampling.nearest,
+        "bilinear": Resampling.bilinear,
+        "cubic": Resampling.cubic,
+        "average": Resampling.average,
     }
-
-    # RadarGrid "virtual" layers (cubes)
-    cube_layers_supported = {
-        "incidenceAngle",
-        "localIncidenceAngle",
-        "totalTroposphere",
-    }
-
-    # Split requested layers into geogrid vs cube
-    geogrid_layers = [l for l in layers if l in layer_to_path]
-    cube_layers = [l for l in layers if l in cube_layers_supported]
-
-    unknown = [
-        l
-        for l in layers
-        if (l not in layer_to_path and l not in cube_layers_supported)
-    ]
-    if unknown:
+    if resampling not in resamp_map:
         raise ValueError(
-            f"Unsupported layer(s): {unknown}. "
-            f"Supported geogrid: {sorted(layer_to_path)}; supported cube: {sorted(cube_layers_supported)}"
+            f"Unsupported resampling: {resampling}. Choose from {list(resamp_map)}"
         )
-
-    resampling = resampling.strip().lower()
-    if not hasattr(Resampling, resampling):
-        raise ValueError(f"Invalid resampling='{resampling}'.")
-    resamp_enum = getattr(Resampling, resampling)
+    user_resamp = resamp_map[resampling]
 
     def _write_geotiff(
-        *, out_path: Path, arr2d: np.ndarray, transform, crs, nodata
+        arr2d: np.ndarray,
+        out_path: Path,
+        *,
+        crs,
+        transform,
+        nodata=None,
     ) -> None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         profile = {
             "driver": "GTiff",
-            "height": int(arr2d.shape[0]),
-            "width": int(arr2d.shape[1]),
+            "height": arr2d.shape[0],
+            "width": arr2d.shape[1],
             "count": 1,
             "dtype": arr2d.dtype,
             "crs": crs,
             "transform": transform,
             "nodata": nodata,
+            "tiled": True,
+            "compress": "deflate",
         }
         with rasterio.open(out_path, "w", **profile) as dst_ds:
             dst_ds.write(arr2d, 1)
+
+    def _warp_to_template(
+        src_arr: np.ndarray,
+        *,
+        src_transform,
+        src_crs,
+        dst_transform,
+        dst_crs,
+        dst_shape: Tuple[int, int],
+        resamp,
+        src_nodata=None,
+        dst_nodata=np.nan,
+    ) -> np.ndarray:
+        dst = np.full(dst_shape, dst_nodata, dtype=np.float32)
+        reproject(
+            source=src_arr.astype(np.float32, copy=False),
+            destination=dst,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=resamp,
+            src_nodata=src_nodata,
+            dst_nodata=dst_nodata,
+        )
+        return dst
+
+    # Computed alias registry
+    computed_aliases = {"totalTroposphere", "localIncidenceAngle"}
 
     all_outputs: Dict[Path, Dict[str, Path]] = {}
 
     for gunw_h5 in files:
         gunw_h5_path = Path(gunw_h5)
         per_file: Dict[str, Path] = {}
-        # -------------------------------------------------
-        # Destination (warp) grid template: compute ONCE per file
-        # Use unwrappedPhase geogrid as the reference grid so ALL outputs
-        # (including connectedComponents + incidence/local incidence) land on
-        # exactly the same dst_transform/dst_width/dst_height.
-        # -------------------------------------------------
-        dst_crs = None
-        dst_transform = None
-        dst_width = None
-        dst_height = None
-        if warp:
-            if dst_epsg is None:
-                raise ValueError("dst_epsg must be provided when warp=True")
-            dst_crs = CRS.from_epsg(int(dst_epsg))
 
-            ref_path = gunw_unwrapped_phase_path(frequency=frequency, pol=pol)
-            with h5py.File(gunw_h5_path, "r") as f_ref:
-                if ref_path not in f_ref:
-                    # Fall back: first requested geogrid layer that exists
-                    for lnm in geogrid_layers:
-                        p = layer_to_path[lnm]
-                        if p in f_ref:
-                            ref_path = p
-                            break
-                    else:
-                        raise ValueError(
-                            "warp=True requires a reference geogrid layer (unwrappedPhase or one of requested geogrid layers)."
+        with h5py.File(gunw_h5_path, "r") as f:
+            idx = build_dataset_index(f)
+
+            # Determine requested names and dataset infos
+            template_info: Optional[DatasetInfo] = (
+                None  # ensure defined for warp=False too
+            )
+
+            if isinstance(layers, str) and layers.lower() == "all":
+                requested_infos = resolve_layer_requests_for_file(
+                    f,
+                    requested="all",
+                    frequency=frequency,
+                    pol=pol,
+                    prefer_geogrid=True,
+                )
+                requested_names = [d.name for d in requested_infos]
+            else:
+                requested_names = (
+                    [layers] if isinstance(layers, str) else list(layers)
+                )
+                requested_infos = []
+                missing = []
+                for nm in requested_names:
+                    if nm in idx:
+                        best = pick_best_candidate(
+                            idx[nm],
+                            frequency=frequency,
+                            pol=pol,
+                            prefer_geogrid=True,
                         )
+                        requested_infos.append(best)
+                    elif nm in computed_aliases:
+                        continue
+                    else:
+                        missing.append(nm)
+                if missing:
+                    raise ValueError(
+                        f"Layer(s) not found in {gunw_h5_path.name}: {missing}"
+                    )
 
-                ds_ref = f_ref[ref_path]
+            # -----------------------------
+            # Build warp template grid ONCE
+            # -----------------------------
+            dst_crs = None
+            dst_transform = None
+            dst_width = None
+            dst_height = None
+
+            if warp:
+                if dst_epsg is None:
+                    raise ValueError(
+                        "dst_epsg must be provided when warp=True"
+                    )
+                dst_crs = CRS.from_epsg(int(dst_epsg))
+
+                if "unwrappedPhase" in idx:
+                    cand = pick_best_candidate(
+                        idx["unwrappedPhase"],
+                        frequency=frequency,
+                        pol=pol,
+                        prefer_geogrid=True,
+                    )
+                    if is_geogrid_2d(f, cand):
+                        template_info = cand
+                if template_info is None:
+                    for info in requested_infos:
+                        if is_geogrid_2d(f, info):
+                            template_info = info
+                            break
+                if template_info is None:
+                    raise ValueError(
+                        "warp=True requires at least one 2D geogrid dataset to define the template grid."
+                    )
+
+                ds_ref = h5_get(f, template_info.path)
                 grp_ref = ds_ref.parent
                 x_ref = np.array(grp_ref["xCoordinates"][()])
                 y_ref = np.array(grp_ref["yCoordinates"][()])
@@ -526,15 +735,23 @@ def extract_gunw_layers_to_geotiff_batch(
                     if "yCoordinateSpacing" in grp_ref
                     else float(y_ref[1] - y_ref[0])
                 )
-
                 epsg_ref = int(np.array(grp_ref["projection"][()]).item())
                 src_crs_ref = CRS.from_epsg(epsg_ref)
 
-                bounds_ref, _, _ = _grid_bounds_from_xy(x_ref, y_ref)
-                left, bottom, right, top = bounds_ref
-
-                # Use the reference raster shape from the dataset itself
+                res_x_ref = abs(dx_ref)
+                res_y_ref = abs(dy_ref)
+                west_ref = float(np.min(x_ref) - res_x_ref / 2.0)
+                north_ref = float(np.max(y_ref) + res_y_ref / 2.0)
                 h_ref, w_ref = ds_ref.shape
+                src_transform_ref = from_origin(
+                    west_ref, north_ref, res_x_ref, res_y_ref
+                )
+
+                left = west_ref
+                right = left + w_ref * res_x_ref
+                top = north_ref
+                bottom = top - h_ref * res_y_ref
+
                 dst_transform, dst_width, dst_height = (
                     calculate_default_transform(
                         src_crs_ref,
@@ -549,260 +766,142 @@ def extract_gunw_layers_to_geotiff_batch(
                     )
                 )
 
-        # -------------------------------------------------
-        # Build the "valid grid" mask from unwrappedPhase on the OUTPUT grid.
-        # We use this mask for connectedComponents + incidence/local incidence so
-        # values outside valid unwrappedPhase are filled with NaN.
-        # -------------------------------------------------
-        unw_valid = None
-        unw_out_transform = None
-        unw_out_crs = None
-        unw_out_shape = None
-        # Always compute mask from unwrappedPhase (even if not requested) because it defines the valid grid.
-        with h5py.File(gunw_h5_path, "r") as f_unw:
-            unw_path = gunw_unwrapped_phase_path(frequency=frequency, pol=pol)
-            if unw_path not in f_unw:
-                raise ValueError(
-                    f"Missing unwrappedPhase dataset needed for validity mask:\n  {unw_path}"
+            # -----------------------------
+            # Build valid-mask from unwrappedPhase (preferred) else template layer
+            # -----------------------------
+            valid_info: Optional[DatasetInfo] = None
+            if "unwrappedPhase" in idx:
+                cand = pick_best_candidate(
+                    idx["unwrappedPhase"],
+                    frequency=frequency,
+                    pol=pol,
+                    prefer_geogrid=True,
                 )
-            ds_unw = f_unw[unw_path]
-            grp_unw = ds_unw.parent
-            unw_arr_native = ds_unw[()]
-            if unw_arr_native.ndim != 2:
+                if is_geogrid_2d(f, cand):
+                    valid_info = cand
+            if valid_info is None:
+                # If warp, template_info will exist; otherwise fall back to first geogrid 2D requested
+                if template_info is not None:
+                    valid_info = template_info
+                else:
+                    for info in requested_infos:
+                        if is_geogrid_2d(f, info):
+                            valid_info = info
+                            break
+            if valid_info is None:
                 raise ValueError(
-                    f"Expected 2D unwrappedPhase, got shape={unw_arr_native.shape}"
+                    "Could not determine a geogrid 2D dataset to build a validity mask."
                 )
 
-            x_unw = np.array(grp_unw["xCoordinates"][()])
-            y_unw = np.array(grp_unw["yCoordinates"][()])
-            dx_unw = (
-                float(np.array(grp_unw["xCoordinateSpacing"][()]).item())
-                if "xCoordinateSpacing" in grp_unw
-                else float(x_unw[1] - x_unw[0])
-            )
-            dy_unw = (
-                float(np.array(grp_unw["yCoordinateSpacing"][()]).item())
-                if "yCoordinateSpacing" in grp_unw
-                else float(y_unw[1] - y_unw[0])
-            )
+            ds_valid = h5_get(f, valid_info.path)
+            grp_valid = ds_valid.parent
+            arr_valid_native = ds_valid[()]
 
-            epsg_unw = int(np.array(grp_unw["projection"][()]).item())
-            unw_src_crs = CRS.from_epsg(epsg_unw)
-
-            res_x_unw = abs(dx_unw)
-            res_y_unw = abs(dy_unw)
-            west_unw = float(np.min(x_unw) - res_x_unw / 2.0)
-            north_unw = float(np.max(y_unw) + res_y_unw / 2.0)
-            unw_src_transform = from_origin(
-                west_unw, north_unw, res_x_unw, res_y_unw
+            x_v = np.array(grp_valid["xCoordinates"][()])
+            y_v = np.array(grp_valid["yCoordinates"][()])
+            dx_v = (
+                float(np.array(grp_valid["xCoordinateSpacing"][()]).item())
+                if "xCoordinateSpacing" in grp_valid
+                else float(x_v[1] - x_v[0])
             )
+            dy_v = (
+                float(np.array(grp_valid["yCoordinateSpacing"][()]).item())
+                if "yCoordinateSpacing" in grp_valid
+                else float(y_v[1] - y_v[0])
+            )
+            epsg_v = int(np.array(grp_valid["projection"][()]).item())
+            src_crs_v = CRS.from_epsg(epsg_v)
 
-            unw_fill = ds_unw.attrs.get("_FillValue", None)
-            try:
-                unw_fill = float(unw_fill) if unw_fill is not None else None
-            except Exception:
-                unw_fill = None
+            res_x_v = abs(dx_v)
+            res_y_v = abs(dy_v)
+            west_v = float(np.min(x_v) - res_x_v / 2.0)
+            north_v = float(np.max(y_v) + res_y_v / 2.0)
+            src_transform_v = from_origin(west_v, north_v, res_x_v, res_y_v)
+
+            fill_v = ds_valid.attrs.get("_FillValue", None)
 
             if warp:
                 assert (
-                    dst_crs is not None
-                    and dst_transform is not None
+                    dst_transform is not None
+                    and dst_crs is not None
                     and dst_width is not None
                     and dst_height is not None
                 )
-                unw_warp = np.full(
-                    (dst_height, dst_width),
-                    unw_fill if unw_fill is not None else np.nan,
-                    dtype=np.float32,
-                )
-
-                reproject(
-                    source=unw_arr_native.astype(np.float32, copy=False),
-                    destination=unw_warp,
-                    src_transform=unw_src_transform,
-                    src_crs=unw_src_crs,
-                    src_nodata=unw_fill,
+                out_valid_arr = _warp_to_template(
+                    arr_valid_native,
+                    src_transform=src_transform_v,
+                    src_crs=src_crs_v,
                     dst_transform=dst_transform,
                     dst_crs=dst_crs,
-                    dst_nodata=unw_fill if unw_fill is not None else np.nan,
-                    resampling=Resampling.nearest,
+                    dst_shape=(dst_height, dst_width),
+                    resamp=Resampling.nearest,
+                    src_nodata=float(fill_v) if fill_v is not None else None,
+                    dst_nodata=np.nan,
+                )
+                unw_valid = np.isfinite(out_valid_arr)
+                if fill_v is not None:
+                    unw_valid &= out_valid_arr != float(fill_v)
+            else:
+                out_valid_arr = arr_valid_native.astype(
+                    np.float32, copy=False
+                )
+                unw_valid = np.isfinite(out_valid_arr)
+                if fill_v is not None:
+                    unw_valid &= out_valid_arr != float(fill_v)
+
+            # -----------------------------
+            # DEM preparation (only if any cube extraction or derived LIA/tropo is needed)
+            # -----------------------------
+            need_dem = False
+            if any(
+                n in requested_names
+                for n in ("incidenceAngle", "localIncidenceAngle")
+            ):
+                need_dem = True
+            for nm in requested_names:
+                if nm in computed_aliases:
+                    need_dem = True
+                elif nm in idx:
+                    best = pick_best_candidate(
+                        idx[nm],
+                        frequency=frequency,
+                        pol=pol,
+                        prefer_geogrid=True,
+                    )
+                    if is_radargrid_cube(f, best) and not is_geogrid_2d(
+                        f, best
+                    ):
+                        need_dem = True
+
+            dem_out: Optional[Path] = None
+            if need_dem:
+                dem_dir_path = (
+                    Path(dem_dir) if dem_dir else (out_dir / "dem_cache")
+                )
+                dem_dir_path.mkdir(parents=True, exist_ok=True)
+
+                gdf = nisar_footprint_from_gunw_h5(
+                    gunw_h5_path,
+                    raster_path=gunw_unwrapped_phase_path(
+                        frequency=frequency, pol=pol
+                    ),
+                    frequency=frequency,
+                    pol=pol,
+                    crs_out="EPSG:4326",
+                )
+                minx, miny, maxx, maxy = gdf.total_bounds
+                key = (
+                    round(float(minx), dem_precision),
+                    round(float(miny), dem_precision),
+                    round(float(maxx), dem_precision),
+                    round(float(maxy), dem_precision),
+                )
+                dem_out = (
+                    dem_dir_path
+                    / f"dem_{key[0]}_{key[1]}_{key[2]}_{key[3]}.tif"
                 )
 
-                unw_out_arr = unw_warp
-                unw_out_transform = dst_transform
-                unw_out_crs = dst_crs
-            else:
-                unw_out_arr = unw_arr_native.astype(np.float32, copy=False)
-                unw_out_transform = unw_src_transform
-                unw_out_crs = unw_src_crs
-
-        # Valid = finite and not fill-value (if present)
-        unw_valid = np.isfinite(unw_out_arr)
-        if unw_fill is not None:
-            # NOTE: if unw_fill==0.0, this can be over-strict for true 0-rad pixels, but matches the requested "valid grid of unwrappedPhase".
-            unw_valid &= unw_out_arr != float(unw_fill)
-
-        unw_out_shape = unw_out_arr.shape
-        # -------------------------
-        # 1) Non-interpolated 2D layers (geogrid)
-        # -------------------------
-        if geogrid_layers:
-            with h5py.File(gunw_h5_path, "r") as f:
-                for layer_name in geogrid_layers:
-                    ds_path = layer_to_path[layer_name]
-                    if ds_path not in f:
-                        raise ValueError(
-                            f"Dataset not found for {layer_name}:\n  {ds_path}"
-                        )
-
-                    ds = f[ds_path]
-                    grp = ds.parent
-                    arr = ds[()]
-
-                    if arr.ndim != 2:
-                        raise ValueError(
-                            f"Expected 2D raster for {layer_name}, got shape={arr.shape}"
-                        )
-
-                    if "xCoordinates" not in grp or "yCoordinates" not in grp:
-                        raise ValueError(
-                            f"Missing xCoordinates/yCoordinates near:\n  {ds_path}"
-                        )
-
-                    x = np.array(grp["xCoordinates"][()])
-                    y = np.array(grp["yCoordinates"][()])
-                    dx = (
-                        float(np.array(grp["xCoordinateSpacing"][()]).item())
-                        if "xCoordinateSpacing" in grp
-                        else float(x[1] - x[0])
-                    )
-                    dy = (
-                        float(np.array(grp["yCoordinateSpacing"][()]).item())
-                        if "yCoordinateSpacing" in grp
-                        else float(y[1] - y[0])
-                    )
-
-                    epsg = None
-                    if "projection" in grp:
-                        try:
-                            epsg = int(np.array(grp["projection"][()]).item())
-                        except Exception:
-                            epsg = None
-                    if not epsg:
-                        raise ValueError(
-                            f"Could not read native EPSG from group 'projection' near:\n  {ds_path}"
-                        )
-
-                    src_crs = CRS.from_epsg(epsg)
-
-                    nodata = ds.attrs.get("_FillValue", None)
-                    if nodata is not None:
-                        try:
-                            nodata = float(nodata)
-                        except Exception:
-                            nodata = None
-
-                    res_x = abs(dx)
-                    res_y = abs(dy)
-                    west = float(np.min(x) - res_x / 2.0)
-                    north = float(np.max(y) + res_y / 2.0)
-                    src_transform = from_origin(west, north, res_x, res_y)
-
-                    height, width = arr.shape
-
-                    if warp:
-                        # Use per-file destination grid template
-                        assert (
-                            dst_crs is not None
-                            and dst_transform is not None
-                            and dst_width is not None
-                            and dst_height is not None
-                        )
-
-                        dst = np.full(
-                            (dst_height, dst_width),
-                            nodata if nodata is not None else 0,
-                            dtype=(
-                                np.float32
-                                if arr.dtype.kind == "f"
-                                else arr.dtype
-                            ),
-                        )
-
-                        reproject(
-                            source=arr,
-                            destination=dst,
-                            src_transform=src_transform,
-                            src_crs=src_crs,
-                            src_nodata=nodata,
-                            dst_transform=dst_transform,
-                            dst_crs=dst_crs,
-                            dst_nodata=nodata,
-                            resampling=resamp_enum,
-                        )
-
-                        out_arr = dst
-                        out_transform = dst_transform
-                        out_crs = dst_crs
-                    else:
-                        out_arr = arr
-                        out_transform = src_transform
-                        out_crs = src_crs
-
-                    # Enforce unwrappedPhase-valid grid masking for select layers.
-                    # - connectedComponents should align to unwrappedPhase grid and be NaN outside valid.
-                    # - unwrappedPhase itself should use the precomputed (warped) array used for the valid mask.
-                    if layer_name == "unwrappedPhase":
-                        out_arr = unw_out_arr
-                        out_transform = unw_out_transform
-                        out_crs = unw_out_crs
-                        nodata = unw_fill
-                    elif layer_name == "connectedComponents":
-                        out_arr = out_arr.astype(np.float32, copy=False)
-                        if unw_valid is not None:
-                            out_arr = np.where(
-                                unw_valid, out_arr, np.nan
-                            ).astype(np.float32, copy=False)
-                        nodata = np.nan
-
-                    out_name = _format_outname(gunw_h5_path, layer_name)
-                    out_path = out_dir / out_name
-
-                    if out_path.exists() and not overwrite:
-                        logger.info("Skipping existing output: %s", out_path)
-                        per_file[layer_name] = out_path
-                        continue
-
-                    _write_geotiff(
-                        out_path=out_path,
-                        arr2d=out_arr,
-                        transform=out_transform,
-                        crs=out_crs,
-                        nodata=nodata,
-                    )
-                    per_file[layer_name] = out_path
-                    logger.info("Wrote %s -> %s", layer_name, out_path)
-
-        # -------------------------
-        # 2) RadarGrid cubes: for each requested cube layer, write BOTH
-        #    - non-interpolated radarGrid slice
-        #    - interpolated cube->geogrid (DEM downloaded on-the-fly)
-        # -------------------------
-        if cube_layers:
-            # Prepare DEM once per file (needed for cube->geogrid interpolation)
-            dem_out = dem_cache_path_for_gunw(
-                gunw_h5_path,
-                out_dir=out_dir,
-                frequency=frequency,
-                pol=pol,
-                raster_path=None,
-                buffer_deg=0.02,
-                precision=3,
-                data_source="COP",
-                keep_egm=False,
-            )
-            if overwrite or (not dem_out.exists()):
-                try:
+                if overwrite or (not dem_out.exists()):
                     download_dem_for_gunw_with_sardem(
                         gunw_h5_path,
                         dem_out,
@@ -814,372 +913,351 @@ def extract_gunw_layers_to_geotiff_batch(
                         keep_egm=False,
                     )
                     logger.info("Prepared DEM -> %s", dem_out)
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Failed to download/prepare DEM for {gunw_h5_path}: {e}"
-                    ) from e
-            else:
-                logger.info("Reusing cached DEM -> %s", dem_out)
+                else:
+                    logger.info("Reusing cached DEM -> %s", dem_out)
 
-            cube_base = "/science/LSAR/GUNW/metadata/radarGrid"
+                # Keep per-file copy
+                dem_copy = out_dir / f"{gunw_h5_path.stem}_DEM.tif"
+                if overwrite or (not dem_copy.exists()):
+                    shutil.copy2(dem_out, dem_copy)
+                per_file["DEM"] = dem_copy
 
-            # Read radarGrid coords/projection once (for slice export + combined cube)
-            with h5py.File(gunw_h5_path, "r") as f:
-                for p in (
-                    f"{cube_base}/xCoordinates",
-                    f"{cube_base}/yCoordinates",
-                    f"{cube_base}/heightAboveEllipsoid",
-                    f"{cube_base}/projection",
-                ):
-                    if p not in f:
-                        raise ValueError(f"Missing radarGrid field:\n  {p}")
+            # -----------------------------
+            # Extract 2D geogrid datasets
+            # -----------------------------
+            for info in requested_infos:
+                if not is_geogrid_2d(f, info):
+                    continue
 
-                xrg = np.array(f[f"{cube_base}/xCoordinates"][()])
-                yrg = np.array(f[f"{cube_base}/yCoordinates"][()])
-                zrg = np.array(f[f"{cube_base}/heightAboveEllipsoid"][()])
-                epsg_rg = int(
-                    np.array(f[f"{cube_base}/projection"][()]).item()
+                ds = h5_get(f, info.path)
+                grp = ds.parent
+                arr = ds[()]
+                if arr.ndim != 2:
+                    continue
+
+                x = np.array(grp["xCoordinates"][()])
+                y = np.array(grp["yCoordinates"][()])
+                dx = (
+                    float(np.array(grp["xCoordinateSpacing"][()]).item())
+                    if "xCoordinateSpacing" in grp
+                    else float(x[1] - x[0])
                 )
-                crs_rg = CRS.from_epsg(epsg_rg)
-
-                # pixel spacing from coordinate diffs (robust to +/- direction)
-                dx_rg = (
-                    float(np.median(np.diff(xrg))) if xrg.size > 1 else 1.0
+                dy = (
+                    float(np.array(grp["yCoordinateSpacing"][()]).item())
+                    if "yCoordinateSpacing" in grp
+                    else float(y[1] - y[0])
                 )
-                dy_rg = (
-                    float(np.median(np.diff(yrg))) if yrg.size > 1 else 1.0
+                epsg = int(np.array(grp["projection"][()]).item())
+                src_crs = CRS.from_epsg(epsg)
+                res_x = abs(dx)
+                res_y = abs(dy)
+                west = float(np.min(x) - res_x / 2.0)
+                north = float(np.max(y) + res_y / 2.0)
+                src_transform = from_origin(west, north, res_x, res_y)
+
+                out_name = _format_outname(gunw_h5_path, info.name)
+                out_path = out_dir / out_name
+                if out_path.exists() and not overwrite:
+                    per_file[info.name] = out_path
+                    continue
+
+                resamp_here = (
+                    Resampling.nearest
+                    if info.name == "connectedComponents"
+                    else user_resamp
                 )
-                res_x_rg = abs(dx_rg)
-                res_y_rg = abs(dy_rg)
-                west_rg = float(np.min(xrg) - res_x_rg / 2.0)
-                north_rg = float(np.max(yrg) + res_y_rg / 2.0)
-                transform_rg = from_origin(
-                    west_rg, north_rg, res_x_rg, res_y_rg
+                src_fill = ds.attrs.get("_FillValue", None)
+
+                if warp:
+                    dst_arr = _warp_to_template(
+                        arr,
+                        src_transform=src_transform,
+                        src_crs=src_crs,
+                        dst_transform=dst_transform,
+                        dst_crs=dst_crs,
+                        dst_shape=(dst_height, dst_width),
+                        resamp=resamp_here,
+                        src_nodata=(
+                            float(src_fill) if src_fill is not None else None
+                        ),
+                        dst_nodata=np.nan,
+                    )
+                    if info.name == "connectedComponents":
+                        dst_arr[~unw_valid] = np.nan
+                    _write_geotiff(
+                        dst_arr.astype(np.float32),
+                        out_path,
+                        crs=dst_crs,
+                        transform=dst_transform,
+                        nodata=np.nan,
+                    )
+                else:
+                    arr_out = arr.astype(np.float32, copy=False)
+                    if info.name == "connectedComponents":
+                        arr_out[~unw_valid] = np.nan
+                    _write_geotiff(
+                        arr_out,
+                        out_path,
+                        crs=src_crs,
+                        transform=src_transform,
+                        nodata=np.nan,
+                    )
+
+                per_file[info.name] = out_path
+
+            # -----------------------------
+            # Derived angles: localIncidenceAngle (and optionally incidenceAngle from cube)
+            # -----------------------------
+            need_local = ("localIncidenceAngle" in requested_names) or (
+                "incidenceAngle" in requested_names
+            )
+            if need_local:
+                if dem_out is None:
+                    raise ValueError(
+                        "DEM is required to derive localIncidenceAngle but was not prepared."
+                    )
+
+                loc_label = "localIncidenceAngle_interp"
+                loc_out = out_dir / _format_outname(gunw_h5_path, loc_label)
+
+                want_inc_interp = ("incidenceAngle" in requested_names) and (
+                    "incidenceAngle" not in per_file
                 )
+                inc_label = "incidenceAngle_interp"
+                inc_out = out_dir / _format_outname(gunw_h5_path, inc_label)
 
-                # choose a representative height slice (median of heights)
-                k = int(np.argmin(np.abs(zrg - float(np.median(zrg)))))
-                z_sel = float(zrg[k])
+                have_loc = loc_out.exists() and not overwrite
+                have_inc = inc_out.exists() and not overwrite
 
-                # Load requested cubes (and compute totalTroposphere cube if requested)
-                cubes: Dict[str, np.ndarray] = {}
+                if (not have_loc) or (want_inc_interp and not have_inc):
+                    inc_arr, local_arr, src_t, src_c = (
+                        interpolate_incidence_and_local_incidence(
+                            gunw_h5_path,
+                            dem_out,
+                            frequency=frequency,
+                            pol=pol,
+                        )
+                    )
 
-                if ("incidenceAngle" in cube_layers) or (
-                    "localIncidenceAngle" in cube_layers
-                ):
-                    inc_path = f"{cube_base}/incidenceAngle"
-                    if inc_path in f:
-                        cubes["incidenceAngle"] = np.asarray(f[inc_path][()])
-                    else:
-                        raise ValueError(
-                            f"Missing radarGrid cube dataset:\n  {inc_path}"
+                    if warp:
+                        dst_shape = (dst_height, dst_width)
+                        loc_w = _warp_to_template(
+                            local_arr,
+                            src_transform=src_t,
+                            src_crs=src_c,
+                            dst_transform=dst_transform,
+                            dst_crs=dst_crs,
+                            dst_shape=dst_shape,
+                            resamp=Resampling.nearest,
+                            src_nodata=np.nan,
+                            dst_nodata=np.nan,
+                        )
+                        loc_w[~unw_valid] = np.nan
+                        _write_geotiff(
+                            loc_w.astype(np.float32),
+                            loc_out,
+                            crs=dst_crs,
+                            transform=dst_transform,
+                            nodata=np.nan,
                         )
 
-                if "totalTroposphere" in cube_layers:
+                        if want_inc_interp:
+                            inc_w = _warp_to_template(
+                                inc_arr,
+                                src_transform=src_t,
+                                src_crs=src_c,
+                                dst_transform=dst_transform,
+                                dst_crs=dst_crs,
+                                dst_shape=dst_shape,
+                                resamp=Resampling.nearest,
+                                src_nodata=np.nan,
+                                dst_nodata=np.nan,
+                            )
+                            inc_w[~unw_valid] = np.nan
+                            _write_geotiff(
+                                inc_w.astype(np.float32),
+                                inc_out,
+                                crs=dst_crs,
+                                transform=dst_transform,
+                                nodata=np.nan,
+                            )
+                    else:
+                        local_arr = local_arr.astype(np.float32, copy=False)
+                        local_arr[~unw_valid] = np.nan
+                        _write_geotiff(
+                            local_arr,
+                            loc_out,
+                            crs=src_c,
+                            transform=src_t,
+                            nodata=np.nan,
+                        )
+
+                        if want_inc_interp:
+                            inc_arr = inc_arr.astype(np.float32, copy=False)
+                            inc_arr[~unw_valid] = np.nan
+                            _write_geotiff(
+                                inc_arr,
+                                inc_out,
+                                crs=src_c,
+                                transform=src_t,
+                                nodata=np.nan,
+                            )
+
+                per_file[loc_label] = loc_out
+                if want_inc_interp:
+                    per_file[inc_label] = inc_out
+
+            # -----------------------------
+            # Extract cube datasets (interpolate -> geogrid -> warp template)
+            # -----------------------------
+            for nm in requested_names:
+                if nm in ("incidenceAngle", "localIncidenceAngle"):
+                    continue
+                if nm in per_file:
+                    continue
+
+                # computed alias: totalTroposphere
+                if nm == "totalTroposphere":
+                    if dem_out is None:
+                        raise ValueError(
+                            "DEM is required for cube interpolation but was not prepared."
+                        )
+                    label = f"{nm}_interp"
+                    out_path = out_dir / _format_outname(gunw_h5_path, label)
+                    if out_path.exists() and not overwrite:
+                        per_file[label] = out_path
+                        continue
+
+                    cube_base = "/science/LSAR/GUNW/metadata/radarGrid"
                     hydro_path = (
                         f"{cube_base}/hydrostaticTroposphericPhaseScreen"
                     )
                     wet_path = f"{cube_base}/wetTroposphericPhaseScreen"
-                    if hydro_path not in f or wet_path not in f:
-                        missing = []
-                        if hydro_path not in f:
-                            missing.append(hydro_path)
-                        if wet_path not in f:
-                            missing.append(wet_path)
+                    try:
+                        hydro = np.asarray(h5_get(f, hydro_path)[()])
+                        wet = np.asarray(h5_get(f, wet_path)[()])
+                    except KeyError as e:
                         raise ValueError(
-                            "Missing required radarGrid cube dataset(s) to compute totalTroposphere:\n  "
-                            + "\n  ".join(missing)
+                            "Cannot compute totalTroposphere; missing hydrostatic/wet troposphere datasets "
+                            f"under {cube_base}"
+                        ) from e
+                    cube = hydro + wet
+
+                    arr_i, src_t, src_c = (
+                        interpolate_radargrid_cube_to_geogrid(
+                            gunw_h5_path,
+                            dem_out,
+                            cube_ds_name=None,
+                            cube_data=cube,
+                            frequency=frequency,
+                            pol=pol,
+                            gunw_geogrid_group="unwrappedInterferogram",
                         )
-                    hydro = np.asarray(f[hydro_path][()])
-                    wet = np.asarray(f[wet_path][()])
-                    if hydro.shape != wet.shape:
-                        raise ValueError(
-                            f"Hydro and wet cubes have different shapes: hydro={hydro.shape}, wet={wet.shape}"
-                        )
-                    cubes["totalTroposphere"] = hydro + wet
-
-            # --- (B) Interpolated cube->geogrid GeoTIFFs ---
-            # Note: incidenceAngle + localIncidenceAngle are generated as a paired product
-            # and (if warp=True) warped onto the exact same destination grid.
-            need_inc = "incidenceAngle" in cube_layers
-            need_local = "localIncidenceAngle" in cube_layers
-
-            # (1) Incidence + Local incidence (paired)
-            if need_inc or need_local:
-                inc_label = "incidenceAngle_interp"
-                local_label = "localIncidenceAngle_interp"
-                inc_out = out_dir / _format_outname(gunw_h5_path, inc_label)
-                local_out = out_dir / _format_outname(
-                    gunw_h5_path, local_label
-                )
-
-                # Decide whether we need to (re)compute
-                inc_done = inc_out.exists() and not overwrite
-                local_done = local_out.exists() and not overwrite
-
-                # If local is requested, we must compute both (local depends on LOS + incidence)
-                must_compute = (need_local and not local_done) or (
-                    need_inc and not inc_done
-                )
-                if must_compute:
-                    if warp:
-                        tmp_inc = out_dir / (inc_out.stem + "_native.tif")
-                        tmp_local = out_dir / (local_out.stem + "_native.tif")
-                    else:
-                        tmp_inc = inc_out
-                        tmp_local = local_out
-
-                    interpolate_incidence_and_local_incidence_to_geotiff(
-                        gunw_h5=gunw_h5_path,
-                        dem_path=dem_out,
-                        out_inc_tif=tmp_inc,
-                        out_local_inc_tif=tmp_local,
-                        frequency=frequency,
-                        pol=pol,
-                        gunw_geogrid_group=gunw_geogrid_group,
-                        cube_interp_method="linear",
-                        dem_resampling="bilinear",
-                        overwrite=True,
-                        dst_nodata=0.0,
                     )
-
                     if warp:
-                        # Warp BOTH products onto the same destination grid computed from incidence
-                        with rasterio.open(tmp_inc) as src_ds:
-                            src_crs = src_ds.crs
-                            src_transform = src_ds.transform
-                            src_arr_inc = src_ds.read(1)
-                            nodata = src_ds.nodata
-                            h, w = src_arr_inc.shape
-                            left, bottom, right, top = (
-                                rasterio.transform.array_bounds(
-                                    h, w, src_transform
-                                )
-                            )
-
-                        # Use per-file destination grid template
-                        assert (
-                            dst_crs is not None
-                            and dst_transform is not None
-                            and dst_width is not None
-                            and dst_height is not None
+                        dst_arr = _warp_to_template(
+                            arr_i,
+                            src_transform=src_t,
+                            src_crs=src_c,
+                            dst_transform=dst_transform,
+                            dst_crs=dst_crs,
+                            dst_shape=(dst_height, dst_width),
+                            resamp=Resampling.nearest,
+                            src_nodata=np.nan,
+                            dst_nodata=np.nan,
+                        )
+                        dst_arr[~unw_valid] = np.nan
+                        _write_geotiff(
+                            dst_arr.astype(np.float32),
+                            out_path,
+                            crs=dst_crs,
+                            transform=dst_transform,
+                            nodata=np.nan,
+                        )
+                    else:
+                        arr_i = arr_i.astype(np.float32, copy=False)
+                        arr_i[~unw_valid] = np.nan
+                        _write_geotiff(
+                            arr_i,
+                            out_path,
+                            crs=src_c,
+                            transform=src_t,
+                            nodata=np.nan,
                         )
 
-                        def _warp_arr(arr_in: np.ndarray) -> np.ndarray:
-                            dst_arr = np.full(
-                                (dst_height, dst_width),
-                                nodata if nodata is not None else 0.0,
-                                dtype=arr_in.dtype,
-                            )
-                            reproject(
-                                source=arr_in,
-                                destination=dst_arr,
-                                src_transform=src_transform,
-                                src_crs=src_crs,
-                                src_nodata=nodata,
-                                dst_transform=dst_transform,
-                                dst_crs=dst_crs,
-                                dst_nodata=(
-                                    nodata if nodata is not None else 0.0
-                                ),
-                                resampling=resamp_enum,
-                            )
-                            return dst_arr
-
-                        # incidence
-                        if need_inc:
-                            inc_w = _warp_arr(src_arr_inc).astype(
-                                np.float32, copy=False
-                            )
-                            if unw_valid is not None:
-                                inc_w = np.where(
-                                    unw_valid, inc_w, np.nan
-                                ).astype(np.float32, copy=False)
-                            _write_geotiff(
-                                out_path=inc_out,
-                                arr2d=inc_w,
-                                transform=unw_out_transform,
-                                crs=unw_out_crs,
-                                nodata=np.nan,
-                            )
-                            per_file[inc_label] = inc_out
-                        else:
-                            # keep in dict if it already existed (handled below)
-                            pass
-
-                        # local incidence (warp using same dst grid)
-                        with rasterio.open(tmp_local) as src_local_ds:
-                            src_arr_local = src_local_ds.read(1)
-                        if need_local:
-                            loc_w = _warp_arr(src_arr_local).astype(
-                                np.float32, copy=False
-                            )
-                            if unw_valid is not None:
-                                loc_w = np.where(
-                                    unw_valid, loc_w, np.nan
-                                ).astype(np.float32, copy=False)
-                            _write_geotiff(
-                                out_path=local_out,
-                                arr2d=loc_w,
-                                transform=unw_out_transform,
-                                crs=unw_out_crs,
-                                nodata=np.nan,
-                            )
-                            per_file[local_label] = local_out
-
-                        # cleanup native temps
-                        try:
-                            tmp_inc.unlink()
-                        except Exception:
-                            pass
-                        try:
-                            tmp_local.unlink()
-                        except Exception:
-                            pass
-                    else:
-                        # no warp; outputs are already on geogrid. Still apply unwrappedPhase-valid mask.
-                        if need_inc:
-                            with rasterio.open(inc_out) as _ds:
-                                _arr = _ds.read(1).astype(
-                                    np.float32, copy=False
-                                )
-                            if unw_valid is not None:
-                                _arr = np.where(
-                                    unw_valid, _arr, np.nan
-                                ).astype(np.float32, copy=False)
-                            _write_geotiff(
-                                out_path=inc_out,
-                                arr2d=_arr,
-                                transform=unw_out_transform,
-                                crs=unw_out_crs,
-                                nodata=np.nan,
-                            )
-                            per_file[inc_label] = inc_out
-                        if need_local:
-                            with rasterio.open(local_out) as _ds:
-                                _arr = _ds.read(1).astype(
-                                    np.float32, copy=False
-                                )
-                            if unw_valid is not None:
-                                _arr = np.where(
-                                    unw_valid, _arr, np.nan
-                                ).astype(np.float32, copy=False)
-                            _write_geotiff(
-                                out_path=local_out,
-                                arr2d=_arr,
-                                transform=unw_out_transform,
-                                crs=unw_out_crs,
-                                nodata=np.nan,
-                            )
-                            per_file[local_label] = local_out
-                else:
-                    # already existed
-                    if need_inc and inc_done:
-                        per_file[inc_label] = inc_out
-                    if need_local and local_done:
-                        per_file[local_label] = local_out
-
-            # (2) Other cube layers (e.g., totalTroposphere)
-            for cube_name in [
-                c
-                for c in cube_layers
-                if c not in ("incidenceAngle", "localIncidenceAngle")
-            ]:
-                label = f"{cube_name}_interp"
-                out_name = _format_outname(gunw_h5_path, label)
-                out_path = out_dir / out_name
-
-                if out_path.exists() and not overwrite:
-                    logger.info("Skipping existing output: %s", out_path)
                     per_file[label] = out_path
                     continue
 
-                tmp_path = out_path
-                if warp:
-                    tmp_path = out_dir / (out_path.stem + "_native.tif")
+                if nm not in idx:
+                    continue
 
-                if cube_name == "totalTroposphere":
-                    interpolate_gunw_radargrid_cube_to_geotiff(
-                        gunw_h5_path,
-                        dem_out,
-                        cube_ds_name=None,
-                        cube_data=cubes["totalTroposphere"],
-                        out_tif=tmp_path,
-                        frequency=frequency,
-                        pol=pol,
-                        cube_interp_method="linear",
-                        dst_nodata=0.0,
-                        overwrite=True,
+                best = pick_best_candidate(
+                    idx[nm], frequency=frequency, pol=pol, prefer_geogrid=True
+                )
+                if not is_radargrid_cube(f, best):
+                    continue
+                if dem_out is None:
+                    raise ValueError(
+                        "DEM is required for cube interpolation but was not prepared."
                     )
-                else:
-                    raise ValueError(f"Unhandled cube layer: {cube_name}")
+
+                label = f"{nm}_interp"
+                out_path = out_dir / _format_outname(gunw_h5_path, label)
+                if out_path.exists() and not overwrite:
+                    per_file[label] = out_path
+                    continue
+
+                arr_i, src_t, src_c = interpolate_radargrid_cube_to_geogrid(
+                    gunw_h5_path,
+                    dem_out,
+                    cube_ds_name=nm,
+                    cube_data=None,
+                    frequency=frequency,
+                    pol=pol,
+                    gunw_geogrid_group="unwrappedInterferogram",
+                )
 
                 if warp:
-                    # Warp tmp_path -> out_path
-                    with rasterio.open(tmp_path) as src_ds:
-                        src_arr = src_ds.read(1)
-                        src_transform = src_ds.transform
-                        src_crs = src_ds.crs
-                        nodata = src_ds.nodata
-                        height, width = src_arr.shape
-                        left, bottom, right, top = (
-                            rasterio.transform.array_bounds(
-                                height, width, src_transform
-                            )
-                        )
-
-                        dst_crs = CRS.from_epsg(int(dst_epsg))
-                        dst_transform, dst_width, dst_height = (
-                            calculate_default_transform(
-                                src_crs,
-                                dst_crs,
-                                width,
-                                height,
-                                left,
-                                bottom,
-                                right,
-                                top,
-                                resolution=dst_res,
-                            )
-                        )
-
-                        dst = np.full(
-                            (dst_height, dst_width),
-                            nodata if nodata is not None else 0.0,
-                            dtype=src_arr.dtype,
-                        )
-
-                        reproject(
-                            source=src_arr,
-                            destination=dst,
-                            src_transform=src_transform,
-                            src_crs=src_crs,
-                            src_nodata=nodata,
-                            dst_transform=dst_transform,
-                            dst_crs=dst_crs,
-                            dst_nodata=nodata if nodata is not None else 0.0,
-                            resampling=resamp_enum,
-                        )
-
+                    dst_arr = _warp_to_template(
+                        arr_i,
+                        src_transform=src_t,
+                        src_crs=src_c,
+                        dst_transform=dst_transform,
+                        dst_crs=dst_crs,
+                        dst_shape=(dst_height, dst_width),
+                        resamp=Resampling.nearest,
+                        src_nodata=np.nan,
+                        dst_nodata=np.nan,
+                    )
+                    dst_arr[~unw_valid] = np.nan
                     _write_geotiff(
-                        out_path=out_path,
-                        arr2d=dst,
-                        transform=dst_transform,
+                        dst_arr.astype(np.float32),
+                        out_path,
                         crs=dst_crs,
-                        nodata=nodata if nodata is not None else 0.0,
+                        transform=dst_transform,
+                        nodata=np.nan,
                     )
-                    per_file[label] = out_path
-                    try:
-                        tmp_path.unlink()
-                    except Exception:
-                        pass
                 else:
-                    per_file[label] = out_path
+                    arr_i = arr_i.astype(np.float32, copy=False)
+                    arr_i[~unw_valid] = np.nan
+                    _write_geotiff(
+                        arr_i,
+                        out_path,
+                        crs=src_c,
+                        transform=src_t,
+                        nodata=np.nan,
+                    )
+
+                per_file[label] = out_path
+
         all_outputs[gunw_h5_path] = per_file
 
     return all_outputs
 
 
+# -----------------------------
+# DEM download (sardem)
+# -----------------------------
 def download_dem_for_gunw_with_sardem(
     gunw_h5: Union[str, Path],
     dem_out: Union[str, Path],
@@ -1199,38 +1277,6 @@ def download_dem_for_gunw_with_sardem(
 ) -> Path:
     """
     Download a DEM covering the NISAR GUNW raster footprint using `sardem`.
-    This:
-      1) builds a footprint polygon from a GUNW raster layer
-      2) converts to EPSG:4326
-      3) derives bbox (west, south, east, north) with optional buffer (degrees)
-      4) runs `sardem --bbox ... --output ...`
-    Parameters
-    ----------
-    gunw_h5 : path
-        NISAR L2 GUNW HDF5 file
-    dem_out : path
-        Output DEM filepath (e.g. ".../dem.tif")
-    frequency, pol, raster_path :
-        Used to pick the raster driving the footprint (defaults to unwrappedPhase path builder).
-    buffer_deg : float
-        Buffer in degrees added to bbox in EPSG:4326.
-    data_source : {"NASA","NASA_WATER","COP"}
-        sardem data source (COP is default).
-    output_format : {"GTiff","ENVI","ROI_PAC"}
-        sardem output format.
-    output_type : {"int16","float32","uint8"}
-        sardem output type (float32 recommended).
-    xrate, yrate : int, optional
-        Upsampling factors passed to sardem (--xrate/--yrate).
-    keep_egm : bool
-        If True, pass --keep-egm (don’t convert geoid heights to ellipsoid heights).
-    cache_dir : path, optional
-        sardem cache directory.
-    overwrite : bool
-        If False and dem_out exists, returns existing path.
-    Returns
-    -------
-    Path to DEM (dem_out).
     """
     gunw_h5 = Path(gunw_h5)
     dem_out = Path(dem_out)
@@ -1238,7 +1284,7 @@ def download_dem_for_gunw_with_sardem(
     if dem_out.exists() and not overwrite:
         logger.info("DEM exists, skipping: %s", dem_out)
         return dem_out
-    # 1) footprint -> EPSG:4326
+
     fp = nisar_footprint_from_gunw_h5(
         gunw_h5,
         raster_path=raster_path,
@@ -1250,12 +1296,12 @@ def download_dem_for_gunw_with_sardem(
         raise ValueError(f"Footprint is empty for: {gunw_h5}")
     geom = fp.geometry.iloc[0]
     west, south, east, north = geom.bounds
-    # 2) buffer in degrees
+
     west -= buffer_deg
     south -= buffer_deg
     east += buffer_deg
     north += buffer_deg
-    # 3) build sardem command
+
     cmd = [
         "sardem",
         "--bbox",
@@ -1280,8 +1326,8 @@ def download_dem_for_gunw_with_sardem(
         cmd += ["--keep-egm"]
     if cache_dir is not None:
         cmd += ["--cache-dir", str(Path(cache_dir))]
+
     logger.info("Running: %s", " ".join(cmd))
-    # 4) run
     try:
         subprocess.run(cmd, check=True)
     except FileNotFoundError as e:
@@ -1294,6 +1340,7 @@ def download_dem_for_gunw_with_sardem(
         raise RuntimeError(
             f"sardem failed with exit code {e.returncode}"
         ) from e
+
     if not dem_out.exists():
         raise RuntimeError(
             f"sardem reported success but output not found: {dem_out}"
@@ -1313,11 +1360,7 @@ def dem_cache_path_for_gunw(
     data_source: str = "COP",
     keep_egm: bool = False,
 ) -> Path:
-    """Return a deterministic DEM path for a scene footprint to enable reuse.
-
-    The DEM filename is derived from the (buffered) EPSG:4326 footprint bounds,
-    rounded to `precision` decimal places, plus key DEM generation options.
-    """
+    """Return a deterministic DEM path for a scene footprint to enable reuse."""
     gunw_h5 = Path(gunw_h5)
     out_dir = Path(out_dir)
     dem_dir = out_dir / "dem_cache"
@@ -1338,7 +1381,6 @@ def dem_cache_path_for_gunw(
     east += buffer_deg
     north += buffer_deg
 
-    # Round bounds to reduce key explosion while still being area-specific.
     w = round(float(west), precision)
     s = round(float(south), precision)
     e = round(float(east), precision)
@@ -1351,13 +1393,7 @@ def dem_cache_path_for_gunw(
 
 # -----------------------------
 # 3D (radarGrid cube) -> 2D (geogrid) interpolation helpers
-#   Implemented to match prep_nisar.py:
-#     - DEM warped to exact x/y grid with GDAL Warp MEM + targetAlignedPixels
-#     - RegularGridInterpolator with axis flipping + NaN fill
-#     - Interpolate only on valid pixels (finite unwrappedPhase + _FillValue)
 # -----------------------------
-
-
 def _grid_bounds_from_xy(
     xcoord: np.ndarray, ycoord: np.ndarray
 ) -> Tuple[Tuple[float, float, float, float], float, float]:
@@ -1436,7 +1472,6 @@ def _warp_to_grid_mem(
     if arr is None:
         raise RuntimeError(f"Failed reading warped array for {src_path}")
 
-    # Ensure 2D
     if arr.ndim == 3:
         arr = arr[0]
     return np.asarray(arr)
@@ -1475,17 +1510,9 @@ def _read_valid_unw_mask_full_geogrid(
     pol: str,
 ) -> np.ndarray:
     """Valid pixels defined as finite unwrappedPhase (+ _FillValue check), over the FULL geogrid."""
-    try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
-
     raster_path = gunw_unwrapped_phase_path(frequency=frequency, pol=pol)
 
     with h5py.File(Path(gunw_file), "r") as f:
-        # Some files may be addressable with or without a leading '/'
         if raster_path in f:
             dset = f[raster_path]
         elif f"/{raster_path}" in f:
@@ -1525,11 +1552,6 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
 ) -> Path:
     """
     Interpolate a 3D NISAR L2 GUNW radarGrid metadata cube onto the GUNW geogrid using a DEM.
-
-    Rewritten to match prep_nisar.py behavior:
-      1) DEM is warped to EXACT geogrid x/y (pixel-aligned) using GDAL Warp MEM
-      2) RegularGridInterpolator flips decreasing axes, returns NaN out-of-bounds
-      3) interpolation happens ONLY on valid pixels (validity from unwrappedPhase)
     """
     gunw_h5 = Path(gunw_h5)
     dem_path = Path(dem_path)
@@ -1544,24 +1566,14 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
         )
 
     try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
-
-    try:
         import rasterio
         from rasterio.crs import CRS
-        from rasterio.transform import from_origin
+        from rasterio.transform import from_origin as rio_from_origin
     except Exception as e:
         raise ImportError(
             "rasterio is required to write GeoTIFF outputs."
         ) from e
 
-    # --------------------------
-    # Read cube + coords (radarGrid) and output geogrid coords (x/y/epsg)
-    # --------------------------
     product_type = "GUNW"
     cube_base = f"/science/LSAR/{product_type}/metadata/radarGrid"
     geo_base = f"/science/LSAR/{product_type}/grids/frequency{frequency}/{gunw_geogrid_group}/{pol}"
@@ -1570,40 +1582,29 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
     proj_path = f"{geo_base}/projection"
 
     with h5py.File(gunw_h5, "r") as f:
-        # radarGrid coords
-        xcoords = np.array(f[f"{cube_base}/xCoordinates"][()])
-        ycoords = np.array(f[f"{cube_base}/yCoordinates"][()])
-        zcoords = np.array(f[f"{cube_base}/heightAboveEllipsoid"][()])
+        xcoords = np.array(h5_get(f, f"{cube_base}/xCoordinates")[()])
+        ycoords = np.array(h5_get(f, f"{cube_base}/yCoordinates")[()])
+        zcoords = np.array(h5_get(f, f"{cube_base}/heightAboveEllipsoid")[()])
 
-        # cube
         if cube_data is None:
             cube_path = f"{cube_base}/{cube_ds_name}"
-            if cube_path not in f:
-                raise ValueError(f"Cube dataset not found: {cube_path}")
-            cube = np.asarray(f[cube_path][()])
+            cube_path_res = resolve_h5_path(f, cube_path)
+            cube = np.asarray(f[cube_path_res][()])
         else:
             cube = np.asarray(cube_data)
 
-        # output geogrid coords + EPSG
-        for p in (xgeo_path, ygeo_path, proj_path):
-            if p not in f:
-                raise ValueError(f"Missing required geogrid dataset: {p}")
-        x_out = np.array(f[xgeo_path][()])
-        y_out = np.array(f[ygeo_path][()])
-        out_epsg = int(np.array(f[proj_path][()]).item())
+        x_out = np.array(h5_get(f, xgeo_path)[()])
+        y_out = np.array(h5_get(f, ygeo_path)[()])
+        out_epsg = int(np.array(h5_get(f, proj_path)[()]).item())
 
     if cube.ndim != 3:
         raise ValueError(f"Expected 3D cube, got shape={cube.shape}")
 
-    # Baseline top/bottom special case
     if cube.shape[0] == 2 and zcoords.size >= 2:
         z_for_interp = np.array([zcoords[0], zcoords[-1]])
     else:
         z_for_interp = zcoords
 
-    # --------------------------
-    # 1) Warp DEM to exact output geogrid
-    # --------------------------
     dem_src_epsg = _read_raster_epsg(dem_path)
     dem_on_grid = _warp_to_grid_mem(
         src_path=dem_path,
@@ -1614,23 +1615,15 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
         resample_alg=dem_resampling,
     ).astype(np.float32, copy=False)
 
-    # --------------------------
-    # 2) Validity mask from unwrappedPhase (full grid)
-    # --------------------------
     valid = _read_valid_unw_mask_full_geogrid(
         gunw_h5, frequency=frequency, pol=pol
     )
-
     if valid.shape != dem_on_grid.shape:
         raise ValueError(
             "Validity mask shape does not match DEM-on-grid shape. "
-            f"mask={valid.shape}, dem={dem_on_grid.shape}. "
-            "Check that unwrappedPhase geogrid matches x/y used for warping."
+            f"mask={valid.shape}, dem={dem_on_grid.shape}."
         )
 
-    # --------------------------
-    # 3) Interpolate cube at valid pixels only: pts=(z=DEM, y, x)
-    # --------------------------
     Y_2d, X_2d = np.meshgrid(y_out, x_out, indexing="ij")
 
     out = np.full(dem_on_grid.shape, np.nan, dtype=np.float32)
@@ -1648,17 +1641,13 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
         )
         out[ii, jj] = itp(pts).astype(np.float32)
 
-    # Replace NaN with dst_nodata
     out = np.where(np.isfinite(out), out, float(dst_nodata)).astype(
         np.float32
     )
 
-    # --------------------------
-    # 4) Write GeoTIFF (native geogrid CRS)
-    # --------------------------
     bounds, dx, dy = _grid_bounds_from_xy(x_out, y_out)
     west, south, east, north = bounds
-    transform = from_origin(west, north, abs(dx), abs(dy))
+    transform = rio_from_origin(west, north, abs(dx), abs(dy))
     crs = CRS.from_epsg(out_epsg)
 
     profile = {
@@ -1683,10 +1672,7 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
 def _approx_degree_spacing_meters(
     *, xcoord: np.ndarray, ycoord: np.ndarray
 ) -> Tuple[float, float]:
-    """
-    Approximate pixel spacing (dx, dy) in meters for a geographic grid (EPSG:4326-like).
-    Uses mean latitude for the scene.
-    """
+    """Approximate pixel spacing (dx, dy) in meters for a geographic grid."""
     if xcoord.size < 2 or ycoord.size < 2:
         raise ValueError("xcoord/ycoord must have at least 2 elements.")
     dx_deg = float(xcoord[1] - xcoord[0])
@@ -1708,9 +1694,7 @@ def _surface_normal_enu_from_dem(
     ycoord: np.ndarray,
     epsg: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Compute unit surface normal (E, N, U) from a DEM on the output grid.
-    """
+    """Compute unit surface normal (E, N, U) from a DEM on the output grid."""
     if int(epsg) == 4326:
         dx_m, dy_m = _approx_degree_spacing_meters(
             xcoord=xcoord, ycoord=ycoord
@@ -1750,15 +1734,7 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
     dst_nodata: float = 0.0,
 ) -> Tuple[Path, Path]:
     """
-    Produce BOTH:
-      1) interpolated incidenceAngle
-      2) interpolated local incidence angle using LOS unit vectors + DEM-derived surface normal
-
-    Notes
-    -----
-    - Uses the same prep_nisar-style DEM warping + 3D interpolation.
-    - Does NOT mask by unwrappedPhase (geometry fields should be defined everywhere).
-    - Assumes losUnitVectorX/Y/Z are in local ENU (E, N, U).
+    Produce BOTH interpolated incidenceAngle and local incidence angle using LOS unit vectors + DEM normal.
     """
     gunw_h5 = Path(gunw_h5)
     dem_path = Path(dem_path)
@@ -1775,16 +1751,9 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
         return out_inc_tif, out_local_inc_tif
 
     try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
-
-    try:
         import rasterio
         from rasterio.crs import CRS
-        from rasterio.transform import from_origin
+        from rasterio.transform import from_origin as rio_from_origin
     except Exception as e:
         raise ImportError(
             "rasterio is required to write GeoTIFF outputs."
@@ -1799,32 +1768,28 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
     proj_path = f"{geo_base}/projection"
 
     with h5py.File(gunw_h5, "r") as f:
-        xrg = np.array(f[f"{cube_base}/xCoordinates"][()])
-        yrg = np.array(f[f"{cube_base}/yCoordinates"][()])
-        zrg = np.array(f[f"{cube_base}/heightAboveEllipsoid"][()])
+        xrg = np.array(h5_get(f, f"{cube_base}/xCoordinates")[()])
+        yrg = np.array(h5_get(f, f"{cube_base}/yCoordinates")[()])
+        zrg = np.array(h5_get(f, f"{cube_base}/heightAboveEllipsoid")[()])
 
-        inc = np.asarray(f[f"{cube_base}/incidenceAngle"][()])
-        los_e = np.asarray(f[f"{cube_base}/losUnitVectorX"][()])
-        los_n = np.asarray(f[f"{cube_base}/losUnitVectorY"][()])
-        # Some NISAR files include only X/Y; derive Z from unit-length constraint.
+        inc = np.asarray(h5_get(f, f"{cube_base}/incidenceAngle")[()])
+        los_e = np.asarray(h5_get(f, f"{cube_base}/losUnitVectorX")[()])
+        los_n = np.asarray(h5_get(f, f"{cube_base}/losUnitVectorY")[()])
+
         los_u = None
         los_u_path = f"{cube_base}/losUnitVectorZ"
-        if los_u_path in f:
-            los_u = np.asarray(f[los_u_path][()])
+        if _h5_exists(f, los_u_path) or _h5_exists(f, los_u_path.lstrip("/")):
+            los_u = np.asarray(h5_get(f, los_u_path)[()])
 
-        x_out = np.array(f[xgeo_path][()])
-        y_out = np.array(f[ygeo_path][()])
-        out_epsg = int(np.array(f[proj_path][()]).item())
+        x_out = np.array(h5_get(f, xgeo_path)[()])
+        y_out = np.array(h5_get(f, ygeo_path)[()])
+        out_epsg = int(np.array(h5_get(f, proj_path)[()]).item())
 
-    cubes_to_check = [
+    for name, cube in [
         ("incidenceAngle", inc),
         ("losUnitVectorX", los_e),
         ("losUnitVectorY", los_n),
-    ]
-    if los_u is not None:
-        cubes_to_check.append(("losUnitVectorZ", los_u))
-
-    for name, cube in cubes_to_check:
+    ]:
         if cube.ndim != 3:
             raise ValueError(
                 f"Expected 3D cube for {name}, got shape={cube.shape}"
@@ -1832,6 +1797,12 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
         if cube.shape != inc.shape:
             raise ValueError(
                 f"Cube shape mismatch: {name}={cube.shape}, incidenceAngle={inc.shape}"
+            )
+
+    if los_u is not None:
+        if los_u.ndim != 3 or los_u.shape != inc.shape:
+            raise ValueError(
+                "losUnitVectorZ cube shape mismatch vs incidenceAngle"
             )
 
     if inc.shape[0] == 2 and zrg.size >= 2:
@@ -1879,13 +1850,10 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
     if itp_u is not None:
         lu = itp_u(pts).reshape(dem_on_grid.shape).astype(np.float32)
     else:
-        # Derive Up component. Assuming LOS is expressed in ENU and points from ground to sensor,
-        # the Up component should be positive.
         lu_sq = 1.0 - (le * le + ln * ln)
         lu_sq = np.clip(lu_sq, 0.0, None)
         lu = np.sqrt(lu_sq).astype(np.float32)
 
-    # Normalize LOS to unit vectors (guard against numerical drift)
     norm = np.sqrt(le * le + ln * ln + lu * lu)
     norm = np.where(norm > 0, norm, 1.0)
     le = (le / norm).astype(np.float32)
@@ -1909,7 +1877,7 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
 
     bounds, dx, dy = _grid_bounds_from_xy(x_out, y_out)
     west, south, east, north = bounds
-    transform = from_origin(west, north, abs(dx), abs(dy))
+    transform = rio_from_origin(west, north, abs(dx), abs(dy))
     crs = CRS.from_epsg(out_epsg)
 
     profile = {
@@ -1934,236 +1902,80 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
     return out_inc_tif, out_local_inc_tif
 
 
-def extract_incidence_angle_from_radargrid(
+# -----------------------------
+# Wrapper functions expected by the batch extractor
+# -----------------------------
+def interpolate_radargrid_cube_to_geogrid(
     gunw_h5: Union[str, Path],
     dem_path: Union[str, Path],
-    out_dir: Union[str, Path],
     *,
-    frequency: str = "A",
-    pol: str = "HH",
+    cube_ds_name: Optional[str],
+    cube_data: Optional[np.ndarray],
+    frequency: str,
+    pol: str,
     gunw_geogrid_group: str = "unwrappedInterferogram",
-    cube_interp_method: str = "linear",
-    dem_resampling: str = "bilinear",
-    overwrite: bool = False,
-) -> Path:
+) -> Tuple[np.ndarray, "rasterio.Affine", "rasterio.crs.CRS"]:
     """
-    3D-interpolate radarGrid/incidenceAngle to the GUNW geogrid using DEM.
-    Output name matches your other exports via _format_outname().
+    Return (array, transform, crs) on the native GUNW geogrid for a radarGrid cube.
+    Implemented by writing a temp GeoTIFF using interpolate_gunw_radargrid_cube_to_geotiff()
+    and reading it back (simple + robust).
     """
-    gunw_h5 = Path(gunw_h5)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_name = _format_outname(gunw_h5, "incidenceAngle")
-    out_tif = out_dir / out_name
-    return interpolate_gunw_radargrid_cube_to_geotiff(
-        gunw_h5=gunw_h5,
-        dem_path=dem_path,
-        cube_ds_name="incidenceAngle",
-        out_tif=out_tif,
-        frequency=frequency,
-        pol=pol,
-        gunw_geogrid_group=gunw_geogrid_group,
-        cube_interp_method=cube_interp_method,
-        dem_resampling=dem_resampling,
-        overwrite=overwrite,
-        dst_dtype="float32",
-        dst_nodata=0.0,
-    )
+    import tempfile
 
+    import rasterio
 
-def extract_incidence_and_local_incidence_angle_from_radargrid(
-    gunw_h5: Union[str, Path],
-    dem_path: Union[str, Path],
-    out_dir: Union[str, Path],
-    *,
-    frequency: str = "A",
-    pol: str = "HH",
-    gunw_geogrid_group: str = "unwrappedInterferogram",
-    cube_interp_method: str = "linear",
-    dem_resampling: str = "bilinear",
-    overwrite: bool = False,
-) -> Dict[str, Path]:
-    """
-    Write BOTH interpolated incidenceAngle and localIncidenceAngle to GeoTIFF.
-    Returns {"incidenceAngle": <path>, "localIncidenceAngle": <path>}.
-    """
-    gunw_h5 = Path(gunw_h5)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    inc_tif = out_dir / _format_outname(gunw_h5, "incidenceAngle_interp")
-    local_tif = out_dir / _format_outname(
-        gunw_h5, "localIncidenceAngle_interp"
-    )
-
-    interpolate_incidence_and_local_incidence_to_geotiff(
-        gunw_h5=gunw_h5,
-        dem_path=dem_path,
-        out_inc_tif=inc_tif,
-        out_local_inc_tif=local_tif,
-        frequency=frequency,
-        pol=pol,
-        gunw_geogrid_group=gunw_geogrid_group,
-        cube_interp_method=cube_interp_method,
-        dem_resampling=dem_resampling,
-        overwrite=overwrite,
-        dst_nodata=0.0,
-    )
-    return {"incidenceAngle": inc_tif, "localIncidenceAngle": local_tif}
-
-
-def extract_combined_tropo_phase_screen_from_radargrid(
-    gunw_h5: Union[str, Path],
-    dem_path: Union[str, Path],
-    out_dir: Union[str, Path],
-    *,
-    frequency: str = "A",
-    pol: str = "HH",
-    gunw_geogrid_group: str = "unwrappedInterferogram",
-    cube_interp_method: str = "linear",
-    dem_resampling: str = "bilinear",
-    overwrite: bool = False,
-) -> Path:
-    """
-    combinedTroposphericPhaseScreen = hydrostaticTroposphericPhaseScreen + wetTroposphericPhaseScreen
-    (sum in radarGrid space, then 3D interpolate to geogrid).
-    """
-    gunw_h5 = Path(gunw_h5)
-    dem_path = Path(dem_path)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_name = _format_outname(gunw_h5, "combinedTroposphericPhaseScreen")
-    out_tif = out_dir / out_name
-    try:
-        import h5py
-    except Exception as e:
-        raise ImportError(
-            "h5py is required to read NISAR GUNW HDF5 files."
-        ) from e
-    # ---- radarGrid dataset paths (adjust if your sample differs) ----
-    # These are the typical locations. If yours are different, we can wire them
-    # through small path helper functions just like the geogrid ones.
-    freq = frequency.upper()
-    pol = pol.upper()
-    hydro_path = (
-        f"science/LSAR/GUNW/metadata/radarGrid/frequency{freq}/"
-        f"hydrostaticTroposphericPhaseScreen"
-    )
-    wet_path = (
-        f"science/LSAR/GUNW/metadata/radarGrid/frequency{freq}/"
-        f"wetTroposphericPhaseScreen"
-    )
-    with h5py.File(gunw_h5, "r") as f:
-        if hydro_path not in f:
-            raise ValueError(f"Missing hydrostatic cube:\n  {hydro_path}")
-        if wet_path not in f:
-            raise ValueError(f"Missing wet cube:\n  {wet_path}")
-        hydro_ds = f[hydro_path]
-        wet_ds = f[wet_path]
-        hydro = hydro_ds[()]
-        wet = wet_ds[()]
-        if hydro.shape != wet.shape:
-            raise ValueError(
-                f"Hydro and wet cube shapes differ: hydro={hydro.shape} wet={wet.shape}"
-            )
-        if hydro.ndim != 3:
-            raise ValueError(
-                f"Expected 3D cubes, got hydro.ndim={hydro.ndim}"
-            )
-        # Handle fill/nodata robustly
-        hydro_fill = hydro_ds.attrs.get("_FillValue", None)
-        wet_fill = wet_ds.attrs.get("_FillValue", None)
-        hydro_mask = np.isfinite(hydro)
-        wet_mask = np.isfinite(wet)
-        if hydro_fill is not None:
-            try:
-                hydro_mask &= hydro != float(hydro_fill)
-            except Exception:
-                pass
-        if wet_fill is not None:
-            try:
-                wet_mask &= wet != float(wet_fill)
-            except Exception:
-                pass
-        valid = hydro_mask & wet_mask
-        combined = np.full(hydro.shape, np.nan, dtype=np.float32)
-        combined[valid] = hydro[valid].astype(np.float32) + wet[valid].astype(
-            np.float32
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "tmp_interp.tif"
+        interpolate_gunw_radargrid_cube_to_geotiff(
+            gunw_h5=gunw_h5,
+            dem_path=dem_path,
+            cube_ds_name=cube_ds_name,
+            cube_data=cube_data,
+            out_tif=tmp,
+            frequency=frequency,
+            pol=pol,
+            gunw_geogrid_group=gunw_geogrid_group,
+            overwrite=True,
+            dst_nodata=np.nan,
         )
-    # Now interpolate the *combined* cube
-    return interpolate_gunw_radargrid_cube_to_geotiff(
-        gunw_h5=gunw_h5,
-        dem_path=dem_path,
-        cube_data=combined,  # <-- key change
-        out_tif=out_tif,
-        frequency=frequency,
-        pol=pol,
-        gunw_geogrid_group=gunw_geogrid_group,
-        cube_interp_method=cube_interp_method,
-        dem_resampling=dem_resampling,
-        overwrite=overwrite,
-        dst_dtype="float32",
-        dst_nodata=0.0,
-    )
+        with rasterio.open(tmp) as ds:
+            arr = ds.read(1).astype(np.float32)
+            return arr, ds.transform, ds.crs
 
 
-def extract_total_troposphere_from_radargrid(
+def interpolate_incidence_and_local_incidence(
     gunw_h5: Union[str, Path],
     dem_path: Union[str, Path],
     *,
-    out_tif: Union[str, Path],
-    frequency: str = "A",
-    pol: str = "HH",
-    overwrite: bool = False,
-) -> Path:
-    """Compute totalTroposphere = hydrostatic + wet (radarGrid cubes) and interpolate to geogrid.
-
-    This follows the same cube->geogrid interpolation used elsewhere (prep_nisar-style).
+    frequency: str,
+    pol: str,
+    gunw_geogrid_group: str = "unwrappedInterferogram",
+) -> Tuple[np.ndarray, np.ndarray, "rasterio.Affine", "rasterio.crs.CRS"]:
     """
-    gunw_h5 = Path(gunw_h5)
-    out_tif = Path(out_tif)
+    Return (incidenceAngle_2d, localIncidenceAngle_2d, transform, crs) on the native GUNW geogrid.
+    """
+    import tempfile
 
-    try:
-        import h5py
-        import numpy as np
-    except Exception as e:
-        raise ImportError(
-            "h5py and numpy are required to read NISAR GUNW HDF5 files"
-        ) from e
+    import rasterio
 
-    cube_base = "/science/LSAR/GUNW/metadata/radarGrid"
-    hydro_path = f"{cube_base}/hydrostaticTroposphericPhaseScreen"
-    wet_path = f"{cube_base}/wetTroposphericPhaseScreen"
-
-    with h5py.File(gunw_h5, "r") as f:
-        if hydro_path not in f or wet_path not in f:
-            missing = []
-            if hydro_path not in f:
-                missing.append(hydro_path)
-            if wet_path not in f:
-                missing.append(wet_path)
-            raise ValueError(
-                "Missing required radarGrid cube dataset(s) to compute totalTroposphere:\n  "
-                + "\n  ".join(missing)
-            )
-        hydro = np.asarray(f[hydro_path][()])
-        wet = np.asarray(f[wet_path][()])
-    if hydro.shape != wet.shape:
-        raise ValueError(
-            f"Hydro and wet cubes have different shapes: hydro={hydro.shape}, wet={wet.shape}"
+    with tempfile.TemporaryDirectory() as td:
+        inc_tif = Path(td) / "inc.tif"
+        lia_tif = Path(td) / "lia.tif"
+        interpolate_incidence_and_local_incidence_to_geotiff(
+            gunw_h5=gunw_h5,
+            dem_path=dem_path,
+            out_inc_tif=inc_tif,
+            out_local_inc_tif=lia_tif,
+            frequency=frequency,
+            pol=pol,
+            gunw_geogrid_group=gunw_geogrid_group,
+            overwrite=True,
+            dst_nodata=np.nan,
         )
-
-    total = hydro + wet
-
-    return interpolate_gunw_radargrid_cube_to_geotiff(
-        gunw_h5=gunw_h5,
-        dem_path=dem_path,
-        cube_ds_name=None,
-        cube_data=total,
-        out_tif=out_tif,
-        frequency=frequency,
-        pol=pol,
-        cube_interp_method="linear",
-        overwrite=overwrite,
-        dst_nodata=0.0,
-    )
+        with rasterio.open(inc_tif) as ds_inc:
+            inc = ds_inc.read(1).astype(np.float32)
+            transform = ds_inc.transform
+            crs = ds_inc.crs
+        with rasterio.open(lia_tif) as ds_lia:
+            lia = ds_lia.read(1).astype(np.float32)
+        return inc, lia, transform, crs
