@@ -13,8 +13,9 @@ This repository requires a Conda environment with specific geospatial libraries 
 To create a new Conda environment named `snowsar` and install the required packages:
 
 ```bash
-git clone git@github.com:ehavazli/snowsar.git
+git clone git@github.com:ehavazli/snowsar.git;
 conda env create -f environment.yml;
+conda activate snowsar;
 pip install -e .
 ```
 
