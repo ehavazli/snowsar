@@ -65,7 +65,7 @@ def get_valid_data_polygon_from_array(
             polys.append(poly)
 
     if not polys:
-        return gpd.GeoDataFrame(geometry=[Polygon()], crs=crs)
+        return gpd.GeoDataFrame(geometry=[], crs=crs)
 
     merged = unary_union(polys)
 

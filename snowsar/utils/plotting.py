@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List
+import re
+from typing import Dict, List, Union
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -10,7 +11,7 @@ import pandas as pd
 
 def plot_snotel_data(
     results: Dict[str, pd.DataFrame],
-    reference_date: pd.Timestamp,
+    reference_date: Union[str, pd.Timestamp],
     dates: List,
     *,
     x_axis: str = "days_since_reference",  # notebook default
@@ -28,13 +29,28 @@ def plot_snotel_data(
     Right:
       - mean and std dev of ΔSWE between consecutive acquisition dates
       - computed across stations, per acquisition date (the "later" date)
+
+    `reference_date` accepts either:
+      - "MM-DD" (anchored to acquisition year), or
+      - any pandas-parseable date string / Timestamp.
     """
     if not results:
         raise ValueError("results is empty")
 
     dates = pd.to_datetime(dates).normalize()
+    if len(dates) == 0:
+        raise ValueError("dates is empty")
+
     reference_year = pd.to_datetime(dates.min()).year
-    reference_date = pd.to_datetime(f"{reference_year}-{reference_date}")
+    if isinstance(reference_date, str):
+        ref_str = reference_date.strip()
+        if re.fullmatch(r"\d{2}-\d{2}", ref_str):
+            reference_date = pd.to_datetime(f"{reference_year}-{ref_str}")
+        else:
+            reference_date = pd.to_datetime(ref_str)
+    else:
+        reference_date = pd.to_datetime(reference_date)
+    reference_date = reference_date.normalize()
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -212,7 +228,4 @@ def make_footprint_station_map(
             ).add_to(m)
 
     folium.LayerControl().add_to(m)
-    return m
-    return m
-    return m
     return m

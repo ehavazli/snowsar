@@ -61,6 +61,15 @@ def fetch_snotel_sites(wsdlurl: str) -> gpd.GeoDataFrame:
     else:
         df["code"] = df["site_key"].astype(str)
 
+    # Ensure a stable station name column exists for downstream consumers.
+    if "name" not in df.columns:
+        df["name"] = df["site_key"].astype(str)
+    else:
+        fallback_name = df["site_key"].astype(str)
+        df["name"] = (
+            df["name"].astype(str).where(df["name"].notna(), fallback_name)
+        )
+
     # Build geometry
     df["geometry"] = [
         Point(lon, lat) for lon, lat in zip(df["longitude"], df["latitude"])
@@ -298,7 +307,19 @@ def fetch_snotel_timeseries(
             ).dt.days
             merged["site_loc"] = site_loc
 
-            results[site_name] = merged[
+            site_name_str = str(site_name).strip()
+            if not site_name_str:
+                site_name_str = str(site_code)
+            result_key = site_name_str
+            if result_key in results:
+                result_key = f"{site_name_str} ({site_code})"
+            if result_key in results:
+                i = 2
+                while f"{result_key} #{i}" in results:
+                    i += 1
+                result_key = f"{result_key} #{i}"
+
+            results[result_key] = merged[
                 [
                     "date_time_utc",
                     "days_since_reference",

@@ -104,9 +104,26 @@ def get_bbox(ctx: dict, margin_deg: float = 0.05, logger: Optional[logging.Logge
 # ---------- Public API: downloads ----------
 
 def _require_isce_home(isce_home: Optional[Path]) -> Path:
-    p = Path(isce_home or os.environ.get("ISCE_HOME", "")).expanduser()
-    if not p:
-        raise EnvironmentError("ISCE_HOME is not set. Set env var or pass isce_home=...")
+    raw = (
+        str(isce_home).strip()
+        if isce_home is not None
+        else os.environ.get("ISCE_HOME", "").strip()
+    )
+    if not raw:
+        raise EnvironmentError(
+            "ISCE_HOME is not set. Set env var or pass isce_home=..."
+        )
+    p = Path(raw).expanduser().resolve()
+    if not p.exists():
+        raise EnvironmentError(f"ISCE_HOME does not exist: {p}")
+
+    apps_dir = p / "applications"
+    required_apps = ("dem.py", "wbd.py", "fixImageXml.py")
+    missing = [name for name in required_apps if not (apps_dir / name).exists()]
+    if missing:
+        raise EnvironmentError(
+            f"ISCE_HOME missing required applications under {apps_dir}: {missing}"
+        )
     return p
 
 

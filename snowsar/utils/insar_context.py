@@ -8,6 +8,14 @@ import geopandas as gpd
 import pandas as pd
 
 
+def _has_nonempty_geometry(gdf: gpd.GeoDataFrame) -> bool:
+    return (
+        (not gdf.empty)
+        and ("geometry" in gdf.columns)
+        and (not gdf.geometry.is_empty.all())
+    )
+
+
 @dataclass(frozen=True)
 class InsarContext:
     """
@@ -75,7 +83,7 @@ def build_insar_context(
         dates = parse_unique_dates_from_hyp3_filenames(hyp3_tifs)
         footprint = footprint_from_geotiffs(hyp3_tifs)
 
-        if footprint.empty:
+        if not _has_nonempty_geometry(footprint):
             raise ValueError(
                 "HyP3 footprint_from_geotiffs() returned empty geometry."
             )
@@ -96,7 +104,7 @@ def build_insar_context(
         mintpy_timeseries_h5, reference_slice=mintpy_reference_slice
     )
 
-    if footprint.empty:
+    if not _has_nonempty_geometry(footprint):
         raise ValueError(
             "MintPy footprint_from_timeseries_h5() returned empty geometry."
         )

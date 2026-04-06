@@ -59,7 +59,9 @@ def _safe_extractall(zf: zipfile.ZipFile, target: Path) -> None:
         member_path = Path(member.filename)
         # Ignore absolute paths, drive letters, or parent traversal
         dest = (target_abs / member_path).resolve()
-        if not str(dest).startswith(str(target_abs)):
+        try:
+            dest.relative_to(target_abs)
+        except ValueError:
             raise RuntimeError(f"Blocked path traversal: {member.filename}")
         if member.is_dir():
             dest.mkdir(parents=True, exist_ok=True)
@@ -112,8 +114,9 @@ def unpack_alos2(top_folder: str | Path, max_workers: int = os.cpu_count() or 4,
     """
     top = Path(top_folder)
     data_dir = (top / "data").resolve()
-    # dates_dir = (top / "dates").resolve()
+    dates_dir = (top / "dates").resolve()
     ensure_dir(data_dir)
+    ensure_dir(dates_dir)
 
     logging.info("Scanning for zip files in %s", data_dir)
     zips = list(iter_zip_files(data_dir))
@@ -124,7 +127,7 @@ def unpack_alos2(top_folder: str | Path, max_workers: int = os.cpu_count() or 4,
     logging.info("Found %d zip files. Starting extraction with %d workers...", len(zips), max_workers)
 
     with cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(unpack_one, zp, data_dir, overwrite, logging.getLogger(__name__)) for zp in zips]
+        futures = [ex.submit(unpack_one, zp, dates_dir, overwrite, logging.getLogger(__name__)) for zp in zips]
         for fut in cf.as_completed(futures):
             logging.info(fut.result())
 
