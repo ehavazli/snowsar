@@ -23,11 +23,77 @@ def get_valid_data_polygon_from_array(
 ) -> gpd.GeoDataFrame:
     """
     Extract valid-data polygon(s) from a 2D array with NaNs.
+
+    Builds a polygon representing the valid (finite) data extent by:
+    1. Creating a binary mask of finite values
+    2. Polygonizing the mask with proper georeferencing
+    3. Filtering small holes within polygons
+    4. Merging all polygons into a single geometry
+
+    Parameters
+    ----------
+    array : np.ndarray
+        2D array with data values. NaN/inf values are treated as invalid.
+    north : float
+        Northern boundary (maximum Y coordinate)
+    south : float
+        Southern boundary (minimum Y coordinate)
+    east : float
+        Eastern boundary (maximum X coordinate)
+    west : float
+        Western boundary (minimum X coordinate)
+    x_step : float
+        Pixel size in X direction (can be negative)
+    y_step : float
+        Pixel size in Y direction (can be negative)
+    crs : str, default "EPSG:4326"
+        Coordinate reference system for output geometry
+    hole_area_min : float, default 0.0
+        Minimum area threshold for keeping holes in polygons.
+        Holes smaller than this are filled.
+    return_largest : bool, default True
+        If True and multiple disconnected polygons exist, return only
+        the largest one. If False, return the MultiPolygon union.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Single-row GeoDataFrame with polygon geometry representing
+        valid data extent. Returns empty GeoDataFrame if no valid data.
+
+    Raises
+    ------
+    ValueError
+        If array is not 2D, or if bounds are invalid (west >= east or south >= north)
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> data = np.random.rand(100, 100)
+    >>> data[30:70, 30:70] = np.nan  # Create hole in center
+    >>> gdf = get_valid_data_polygon_from_array(
+    ...     data, north=50.0, south=40.0, east=-120.0, west=-121.0,
+    ...     x_step=0.01, y_step=-0.01
+    ... )
+    >>> print(gdf.geometry[0].geom_type)
+    Polygon
     """
+    # Validate inputs
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"array must be numpy.ndarray, got {type(array)}")
     if array.ndim != 2:
-        raise ValueError("array must be 2D")
+        raise ValueError(f"array must be 2D, got shape {array.shape}")
+    if array.size == 0:
+        raise ValueError("array is empty")
     if not (west < east and south < north):
-        raise ValueError("Invalid bounds: expected west<east and south<north")
+        raise ValueError(
+            f"Invalid bounds: expected west < east and south < north, "
+            f"got west={west}, east={east}, south={south}, north={north}"
+        )
+    if x_step == 0 or y_step == 0:
+        raise ValueError(f"Step sizes must be non-zero, got x_step={x_step}, y_step={y_step}")
+    if not np.isfinite([north, south, east, west, x_step, y_step]).all():
+        raise ValueError("All coordinate parameters must be finite numbers")
 
     xsize = float(abs(x_step))
     ysize = float(abs(y_step))
