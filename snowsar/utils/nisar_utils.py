@@ -38,6 +38,21 @@ _DEFAULT_DEM_BUFFER_DEG = 0.02
 # HDF5 path resolution helpers
 # -----------------------------
 def _h5_exists(f: Union[h5py.File, h5py.Group], path: str) -> bool:
+    """
+    Check if HDF5 path exists in file or group.
+
+    Parameters
+    ----------
+    f : h5py.File or h5py.Group
+        HDF5 file or group object
+    path : str
+        Path to check
+
+    Returns
+    -------
+    bool
+        True if path exists, False otherwise
+    """
     try:
         f[path]
         return True
@@ -51,16 +66,38 @@ def resolve_h5_path(
     *,
     extra_candidates: Optional[Sequence[str]] = None,
 ) -> str:
-    """Resolve an HDF5 dataset/group path robustly.
+    """
+    Resolve HDF5 dataset/group path robustly with leading slash variants.
 
     NISAR GUNW files are sometimes addressed with and without a leading '/'
     (e.g., '/science/LSAR/...' vs 'science/LSAR/...'). This helper tries both
     forms (plus any extra candidates) and returns the first that exists.
 
+    Parameters
+    ----------
+    f : h5py.File or h5py.Group
+        HDF5 file or group object
+    path : str
+        Path to resolve (with or without leading '/')
+    extra_candidates : Sequence[str], optional
+        Additional path variants to try
+
+    Returns
+    -------
+    str
+        First existing path from candidates
+
     Raises
     ------
     KeyError
-        If none of the candidate paths exist.
+        If none of the candidate paths exist in file/group.
+        Error message includes attempted paths and top-level keys.
+
+    Examples
+    --------
+    >>> with h5py.File("GUNW.h5", "r") as f:
+    ...     path = resolve_h5_path(f, "science/LSAR/GUNW/metadata")
+    ...     # Returns "/science/LSAR/GUNW/metadata" or "science/LSAR/GUNW/metadata"
     """
     p = posixpath.normpath(path.strip())
 
@@ -96,7 +133,29 @@ def resolve_h5_path(
 def h5_get(
     f: Union[h5py.File, h5py.Group], path: str
 ) -> Union[h5py.Dataset, h5py.Group]:
-    """Convenience wrapper returning the dataset/group at a resolved path."""
+    """
+    Get HDF5 dataset/group at path with automatic path resolution.
+
+    Convenience wrapper around resolve_h5_path() that handles leading slash
+    variants and returns the dataset or group object.
+
+    Parameters
+    ----------
+    f : h5py.File or h5py.Group
+        HDF5 file or group object
+    path : str
+        Path to dataset or group (with or without leading '/')
+
+    Returns
+    -------
+    h5py.Dataset or h5py.Group
+        HDF5 dataset or group object at resolved path
+
+    Raises
+    ------
+    KeyError
+        If path cannot be resolved (see resolve_h5_path)
+    """
     return f[resolve_h5_path(f, path)]
 
 
@@ -492,8 +551,39 @@ def _gunw_date_tokens_from_filename(
     sec_block: int = 13,
 ) -> Tuple[str, str, str, str]:
     """
-    Parse reference/secondary date tokens from a NISAR GUNW filename.
-    Returns (ref_date, sec_date, track, frame) as strings.
+    Parse date and track/frame identifiers from NISAR GUNW filename.
+
+    Extracts reference date, secondary date, track, and frame by splitting
+    filename on underscores and indexing specific blocks.
+
+    Parameters
+    ----------
+    gunw_h5 : str or Path
+        Path to NISAR GUNW HDF5 file
+    track_block : int, default 5
+        Underscore-delimited block index for track number
+    frame_block : int, default 7
+        Underscore-delimited block index for frame number
+    ref_block : int, default 12
+        Underscore-delimited block index for reference date
+    sec_block : int, default 13
+        Underscore-delimited block index for secondary date
+
+    Returns
+    -------
+    Tuple[str, str, str, str]
+        (ref_date, sec_date, track, frame) as strings.
+        Dates are YYYYMMDD format (extracted before 'T' separator).
+
+    Raises
+    ------
+    ValueError
+        If filename doesn't have enough underscore-separated blocks
+
+    Notes
+    -----
+    Default block indices match NISAR GUNW naming convention as of 2024.
+    Adjust block parameters if filename format changes.
     """
     p = Path(gunw_h5)
     parts = p.stem.split("_")
@@ -514,6 +604,28 @@ def _format_outname(
     gunw_h5: Union[str, Path],
     layer_name: str,
 ) -> str:
+    """
+    Generate standardized output filename for GUNW layer GeoTIFF.
+
+    Creates filename in format: {ref_date}_{sec_date}_{layer_name}_T{track}_F{frame}.tif
+
+    Parameters
+    ----------
+    gunw_h5 : str or Path
+        Path to NISAR GUNW HDF5 file (used to extract date/track/frame)
+    layer_name : str
+        Layer identifier (e.g., "unwrappedPhase", "coherenceMagnitude")
+
+    Returns
+    -------
+    str
+        Formatted GeoTIFF filename
+
+    Examples
+    --------
+    >>> _format_outname("GUNW_20210101T000000_20210113T000000_T123_F456.h5", "unwrappedPhase")
+    '20210101_20210113_unwrappedPhase_T123_F456.tif'
+    """
     ref_date, sec_date, track, frame = _gunw_date_tokens_from_filename(
         gunw_h5
     )
@@ -525,7 +637,24 @@ def _format_outname(
 # -----------------------------
 @dataclass(frozen=True)
 class DatasetInfo:
-    """Lightweight index entry for an HDF5 dataset."""
+    """
+    Lightweight index entry for an HDF5 dataset.
+
+    Stores metadata about an HDF5 dataset for layer discovery and routing.
+
+    Attributes
+    ----------
+    path : str
+        Full HDF5 path to dataset (e.g., "/science/LSAR/GUNW/grids/frequencyA/...")
+    name : str
+        Dataset basename (final component of path)
+    ndim : int
+        Number of dimensions
+    shape : Tuple[int, ...]
+        Array shape
+    parent_path : str
+        Path to parent group
+    """
 
     path: str
     name: str
@@ -535,7 +664,32 @@ class DatasetInfo:
 
 
 def build_dataset_index(f: h5py.File) -> Dict[str, List[DatasetInfo]]:
-    """Build an index: dataset basename -> list of candidates across the file."""
+    """
+    Build index of all datasets in HDF5 file by basename.
+
+    Recursively visits all datasets in file and creates a dictionary mapping
+    dataset basenames to lists of matching DatasetInfo objects. Useful for
+    finding datasets when multiple paths might contain the same layer name.
+
+    Parameters
+    ----------
+    f : h5py.File
+        Open HDF5 file object
+
+    Returns
+    -------
+    Dict[str, List[DatasetInfo]]
+        Dictionary mapping dataset basename to list of all matching DatasetInfo
+        objects found in file. Multiple entries occur when same name appears
+        in different groups (e.g., multiple frequencies/polarizations).
+
+    Examples
+    --------
+    >>> with h5py.File("GUNW.h5", "r") as f:
+    ...     index = build_dataset_index(f)
+    ...     len(index["unwrappedPhase"])  # May have multiple freq/pol combinations
+    4
+    """
     out: Dict[str, List[DatasetInfo]] = {}
 
     def _visitor(name: str, obj) -> None:
@@ -570,13 +724,46 @@ def pick_best_candidate(
     pol: str,
     prefer_geogrid: bool = True,
 ) -> DatasetInfo:
-    """Pick the best dataset match among multiple candidates.
+    """
+    Select best dataset from multiple candidates using heuristic scoring.
 
-    Preference order (roughly):
-    1) 2D geogrid datasets under /grids/ (if prefer_geogrid=True)
-    2) matching frequency{A/B}
-    3) matching polarization folder
-    4) radarGrid cubes under /metadata/radarGrid/ (as fallback)
+    Scores each candidate based on path characteristics and returns the
+    highest-scoring match. Prioritizes geocoded grids over radar grids,
+    and matches on frequency and polarization.
+
+    Parameters
+    ----------
+    candidates : List[DatasetInfo]
+        List of candidate datasets (typically from build_dataset_index)
+    frequency : str
+        Desired frequency band ("A" or "B")
+    pol : str
+        Desired polarization ("HH", "HV", "VH", "VV")
+    prefer_geogrid : bool, default True
+        Whether to prefer 2D geocoded grids over 3D radar grids
+
+    Returns
+    -------
+    DatasetInfo
+        Best matching dataset based on scoring
+
+    Notes
+    -----
+    Scoring preference order:
+    1. 2D geogrid datasets under /grids/ (+100 points if prefer_geogrid=True)
+    2. Matching frequency{A/B} in path (+30 points)
+    3. Matching polarization folder (+25 points)
+    4. 3D radarGrid cubes under /metadata/radarGrid/ (+20 points)
+    5. unwrappedInterferogram in path (+15 points)
+
+    Highest-scoring candidate is returned. Ties are broken by first occurrence.
+
+    Examples
+    --------
+    >>> candidates = index["unwrappedPhase"]
+    >>> best = pick_best_candidate(candidates, frequency="A", pol="HH")
+    >>> "frequencyA" in best.path
+    True
     """
     freq = f"frequency{frequency.upper()}"
     pol_u = pol.upper()
@@ -1532,7 +1719,31 @@ def dem_cache_path_for_gunw(
 def _grid_bounds_from_xy(
     xcoord: np.ndarray, ycoord: np.ndarray
 ) -> Tuple[Tuple[float, float, float, float], float, float]:
-    """Compute pixel-edge bounds aligned to xcoord/ycoord (pixel centers)."""
+    """
+    Compute pixel-edge bounds from coordinate arrays (pixel centers).
+
+    Derives grid bounds and pixel spacing assuming input coordinates represent
+    pixel centers. Extends bounds by half-pixel to get edge coordinates.
+
+    Parameters
+    ----------
+    xcoord : np.ndarray
+        1D array of X coordinates (pixel centers), length >= 2
+    ycoord : np.ndarray
+        1D array of Y coordinates (pixel centers), length >= 2
+
+    Returns
+    -------
+    Tuple[Tuple[float, float, float, float], float, float]
+        - Bounds tuple: (minx, miny, maxx, maxy) in coordinate order
+        - dx: pixel spacing in X direction (can be negative)
+        - dy: pixel spacing in Y direction (can be negative)
+
+    Raises
+    ------
+    ValueError
+        If either coordinate array has fewer than 2 elements
+    """
     if xcoord.size < 2 or ycoord.size < 2:
         raise ValueError(
             "xcoord/ycoord must have at least 2 elements to infer spacing."
@@ -1553,7 +1764,33 @@ def _grid_bounds_from_xy(
 
 
 def _read_raster_epsg(path: Union[str, Path]) -> int:
-    """Read EPSG code from a raster file using GDAL."""
+    """
+    Extract EPSG code from raster file using GDAL.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to raster file (GeoTIFF, VRT, etc.)
+
+    Returns
+    -------
+    int
+        EPSG code from raster spatial reference
+
+    Raises
+    ------
+    ImportError
+        If GDAL (osgeo) is not installed
+    OSError
+        If raster file cannot be opened
+    ValueError
+        If raster projection lacks EPSG authority code
+
+    Notes
+    -----
+    Requires raster CRS to have explicit EPSG authority metadata.
+    Rasters with WKT-only or custom projections will fail.
+    """
     try:
         from osgeo import gdal, osr
     except Exception as e:
@@ -1581,7 +1818,43 @@ def _warp_to_grid_mem(
     ycoord: np.ndarray,
     resample_alg: str,
 ) -> np.ndarray:
-    """Warp raster to the exact xcoord/ycoord grid using GDAL MEM output."""
+    """
+    Warp raster to exact coordinate grid using GDAL in-memory driver.
+
+    Reprojects and resamples source raster to match target coordinate arrays,
+    returning result as NumPy array without writing to disk.
+
+    Parameters
+    ----------
+    src_path : str or Path
+        Path to source raster file
+    src_epsg : int
+        Source EPSG code
+    dst_epsg : int
+        Destination EPSG code
+    xcoord : np.ndarray
+        Target X coordinates (pixel centers), 1D array
+    ycoord : np.ndarray
+        Target Y coordinates (pixel centers), 1D array
+    resample_alg : str
+        GDAL resampling algorithm ("bilinear", "cubic", "near", etc.)
+
+    Returns
+    -------
+    np.ndarray
+        Warped raster as 2D array with shape (len(ycoord), len(xcoord))
+
+    Raises
+    ------
+    ImportError
+        If GDAL (osgeo) is not installed
+    RuntimeError
+        If GDAL warp operation fails
+
+    Notes
+    -----
+    Uses GDAL MEM driver for efficiency. Output array matches target grid exactly.
+    """
     try:
         from osgeo import gdal
     except Exception as e:
@@ -1617,21 +1890,37 @@ def _make_rgi(
     values: np.ndarray,
     method: str = "linear",
 ):
-    """RegularGridInterpolator wrapper matching prep_nisar.py behavior.
+    """
+    Create RegularGridInterpolator for N-D gridded data.
+
+    Wrapper around scipy's RegularGridInterpolator configured to return NaN
+    for out-of-bounds queries instead of raising errors.
 
     Parameters
     ----------
     grid_axes : Sequence[np.ndarray]
-        Sequence of 1D arrays representing grid coordinates along each axis
+        Sequence of 1D coordinate arrays, one per dimension.
+        For 3D radar cube: typically [azimuth_time, slant_range, layer_index]
     values : np.ndarray
-        N-dimensional array of values on the grid
+        N-dimensional array of values on the grid.
+        Shape must match (len(axis0), len(axis1), ..., len(axisN))
     method : str, default "linear"
-        Interpolation method (e.g., "linear", "nearest")
+        Interpolation method: "linear", "nearest", "slinear", "cubic", "quintic"
 
     Returns
     -------
     RegularGridInterpolator
-        Scipy interpolator object
+        Configured scipy interpolator with bounds_error=False and fill_value=NaN
+
+    Raises
+    ------
+    ImportError
+        If scipy is not installed
+
+    Notes
+    -----
+    Configured with bounds_error=False and fill_value=np.nan, so queries
+    outside grid bounds return NaN instead of raising ValueError.
     """
     try:
         from scipy.interpolate import RegularGridInterpolator
@@ -1663,7 +1952,38 @@ def _read_valid_unw_mask_full_geogrid(
     frequency: str,
     pol: str,
 ) -> np.ndarray:
-    """Valid pixels defined as finite unwrappedPhase (+ _FillValue check), over the FULL geogrid."""
+    """
+    Read validity mask from unwrapped phase dataset on full geocoded grid.
+
+    Derives boolean mask where pixels are valid if they have finite unwrapped
+    phase values and don't match _FillValue attribute.
+
+    Parameters
+    ----------
+    gunw_file : str or Path
+        Path to NISAR GUNW HDF5 file
+    frequency : str
+        Frequency band ("A" or "B")
+    pol : str
+        Polarization ("HH", "HV", "VH", "VV")
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask with True for valid pixels, False for invalid/nodata.
+        Shape matches full geocoded grid.
+
+    Raises
+    ------
+    ValueError
+        If unwrappedPhase dataset not found in file
+
+    Notes
+    -----
+    Valid pixels must pass both:
+    - np.isfinite(unwrappedPhase)
+    - unwrappedPhase != _FillValue (if attribute exists)
+    """
     raster_path = gunw_unwrapped_phase_path(frequency=frequency, pol=pol)
 
     with h5py.File(Path(gunw_file), "r") as f:
