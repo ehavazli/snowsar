@@ -125,17 +125,17 @@ def _read_geogrid_coords(
     epsg : int or None
         EPSG code from projection attribute, or None if not available
     """
-    x = np.array(grp["xCoordinates"][()])
-    y = np.array(grp["yCoordinates"][()])
+    x = grp["xCoordinates"][()]
+    y = grp["yCoordinates"][()]
 
     # Read spacing or compute from coordinate arrays
     if "xCoordinateSpacing" in grp:
-        dx = float(np.array(grp["xCoordinateSpacing"][()]).item())
+        dx = float(grp["xCoordinateSpacing"][()].item())
     else:
         dx = float(x[1] - x[0])
 
     if "yCoordinateSpacing" in grp:
-        dy = float(np.array(grp["yCoordinateSpacing"][()]).item())
+        dy = float(grp["yCoordinateSpacing"][()].item())
     else:
         dy = float(y[1] - y[0])
 
@@ -143,7 +143,7 @@ def _read_geogrid_coords(
     epsg = None
     if "projection" in grp:
         try:
-            epsg = int(np.array(grp["projection"][()]).item())
+            epsg = int(grp["projection"][()].item())
         except (ValueError, TypeError, AttributeError):
             epsg = None
 
@@ -838,8 +838,9 @@ def extract_gunw_layers_to_geotiff_batch(
 
                 res_x_ref = abs(dx_ref)
                 res_y_ref = abs(dy_ref)
-                west_ref = float(np.min(x_ref) - res_x_ref / 2.0)
-                north_ref = float(np.max(y_ref) + res_y_ref / 2.0)
+                # Use array methods instead of np.min/max for better performance
+                west_ref = float(x_ref.min() - res_x_ref / 2.0)
+                north_ref = float(y_ref.max() + res_y_ref / 2.0)
                 h_ref, w_ref = ds_ref.shape
                 src_transform_ref = from_origin(
                     west_ref, north_ref, res_x_ref, res_y_ref
@@ -891,19 +892,27 @@ def extract_gunw_layers_to_geotiff_batch(
                     "Could not determine a geogrid 2D dataset to build a validity mask."
                 )
 
-            ds_valid = h5_get(f, valid_info.path)
-            grp_valid = ds_valid.parent
-            arr_valid_native = ds_valid[()]
-
-            x_v, y_v, dx_v, dy_v, epsg_v = _read_geogrid_coords(grp_valid)
+            # Optimization: reuse ds_ref if valid_info points to same dataset as template
+            if warp and valid_info.path == template_info.path:
+                # Reuse already-loaded template dataset to avoid redundant HDF5 read
+                ds_valid = ds_ref
+                grp_valid = grp_ref
+                arr_valid_native = ds_ref[()]
+                x_v, y_v, dx_v, dy_v, epsg_v = x_ref, y_ref, dx_ref, dy_ref, epsg_ref
+            else:
+                # Load validity dataset
+                ds_valid = h5_get(f, valid_info.path)
+                grp_valid = ds_valid.parent
+                arr_valid_native = ds_valid[()]
+                x_v, y_v, dx_v, dy_v, epsg_v = _read_geogrid_coords(grp_valid)
             if epsg_v is None:
                 raise ValueError("Valid mask dataset missing projection/EPSG information")
             src_crs_v = CRS.from_epsg(epsg_v)
 
             res_x_v = abs(dx_v)
             res_y_v = abs(dy_v)
-            west_v = float(np.min(x_v) - res_x_v / 2.0)
-            north_v = float(np.max(y_v) + res_y_v / 2.0)
+            west_v = float(x_v.min() - res_x_v / 2.0)
+            north_v = float(y_v.max() + res_y_v / 2.0)
             src_transform_v = from_origin(west_v, north_v, res_x_v, res_y_v)
 
             fill_v = ds_valid.attrs.get("_FillValue", None)
@@ -1077,8 +1086,8 @@ def extract_gunw_layers_to_geotiff_batch(
                 src_crs = CRS.from_epsg(epsg)
                 res_x = abs(dx)
                 res_y = abs(dy)
-                west = float(np.min(x) - res_x / 2.0)
-                north = float(np.max(y) + res_y / 2.0)
+                west = float(x.min() - res_x / 2.0)
+                north = float(y.max() + res_y / 2.0)
                 src_transform = from_origin(west, north, res_x, res_y)
 
                 out_name = _format_outname(gunw_h5_path, info.name)
