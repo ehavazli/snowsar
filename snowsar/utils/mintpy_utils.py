@@ -12,10 +12,41 @@ def mintpy_dates_from_timeseries_h5(
     timeseries_h5: Union[str, Path],
 ) -> List[pd.Timestamp]:
     """
-    Extract acquisition dates from MintPy geo_timeseries*.h5.
+    Extract acquisition dates from MintPy geocoded timeseries HDF5 file.
 
-    Uses mintpy.readfile.get_slice_list() and parses YYYYMMDD from slice names.
-    Returns normalized pd.Timestamp list.
+    Reads slice names from MintPy timeseries file, extracts YYYYMMDD date tokens,
+    and returns unique sorted dates as normalized timestamps.
+
+    Parameters
+    ----------
+    timeseries_h5 : str or Path
+        Path to MintPy geocoded timeseries file (e.g., geo_timeseries*.h5)
+
+    Returns
+    -------
+    List[pd.Timestamp]
+        Sorted list of unique acquisition dates, normalized to midnight (00:00:00)
+
+    Raises
+    ------
+    ImportError
+        If mintpy package is not installed
+    ValueError
+        If no slices found in file or no valid YYYYMMDD dates parsed
+
+    Notes
+    -----
+    - Uses the last 8-digit token in each slice name as the date
+    - Slice names typically follow format: "timeseries-YYYYMMDD" or "YYYYMMDD_YYYYMMDD"
+    - Duplicate dates across slices are automatically deduplicated
+
+    Examples
+    --------
+    >>> dates = mintpy_dates_from_timeseries_h5("geo_timeseries_ERA5_demErr.h5")
+    >>> len(dates)
+    45
+    >>> dates[0]
+    Timestamp('2020-10-01 00:00:00')
     """
     import re
 
@@ -23,7 +54,7 @@ def mintpy_dates_from_timeseries_h5(
 
     try:
         from mintpy.utils import readfile
-    except Exception as e:
+    except ImportError as e:
         raise ImportError(
             "mintpy is required for mintpy_dates_from_timeseries_h5(). "
             "Install mintpy in your environment."
@@ -58,17 +89,55 @@ def mintpy_footprint_from_timeseries_h5(
     crs: str = "EPSG:4326",
 ) -> gpd.GeoDataFrame:
     """
-    Build a footprint polygon from a MintPy geo_timeseries*.h5 by reading one slice,
-    and extracting the valid-data region using geocoding metadata.
+    Build valid-data footprint polygon from MintPy geocoded timeseries file.
 
-    Uses geometry.get_valid_data_polygon_from_array() with the *lowercase* step args:
-      x_step, y_step
+    Reads one time slice from MintPy timeseries, extracts georeferencing metadata,
+    and generates a polygon representing the valid (non-NaN) data extent.
+
+    Parameters
+    ----------
+    timeseries_h5 : str or Path
+        Path to MintPy geocoded timeseries file (e.g., geo_timeseries*.h5)
+    reference_slice : str, optional
+        Specific slice name to use for footprint generation.
+        If None (default), uses the first available slice.
+    crs : str, default "EPSG:4326"
+        Target coordinate reference system for output geometry
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Single-row GeoDataFrame with Polygon geometry representing valid data extent.
+        Returns empty GeoDataFrame if no valid data found.
+
+    Raises
+    ------
+    ImportError
+        If mintpy package is not installed
+    ValueError
+        If no slices found in file or required geocoding attributes are missing
+        (X_FIRST, Y_FIRST, X_STEP, Y_STEP)
+
+    Notes
+    -----
+    - Footprint is derived from finite (non-NaN/non-inf) values in the selected slice
+    - Uses first slice by default, which may not represent the full valid extent
+      across all time slices if masks vary temporally
+    - Geocoding bounds are computed from grid attributes and array shape
+
+    Examples
+    --------
+    >>> footprint = mintpy_footprint_from_timeseries_h5("geo_timeseries_ERA5_demErr.h5")
+    >>> footprint.geometry[0].area
+    0.425
+    >>> footprint.crs
+    CRS.from_epsg(4326)
     """
     timeseries_h5 = Path(timeseries_h5)
 
     try:
         from mintpy.utils import readfile
-    except Exception as e:
+    except ImportError as e:
         raise ImportError(
             "mintpy is required for mintpy_footprint_from_timeseries_h5(). "
             "Install mintpy in your environment."
