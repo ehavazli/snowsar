@@ -150,7 +150,19 @@ def mintpy_footprint_from_timeseries_h5(
     if not slices:
         raise ValueError(f"No slices found in: {timeseries_h5}")
 
-    slice_name = reference_slice or slices[0]
+    # Validate reference_slice if provided
+    if reference_slice is not None:
+        if reference_slice not in slices:
+            raise ValueError(
+                f"reference_slice '{reference_slice}' not found in file.\n"
+                f"  File: {timeseries_h5}\n"
+                f"  Available slices: {slices[:10]}" +
+                (f" ... ({len(slices)} total)" if len(slices) > 10 else "")
+            )
+        slice_name = reference_slice
+    else:
+        slice_name = slices[0]
+
     data, atr = readfile.read(str(timeseries_h5), datasetName=slice_name)
     data = np.array(data)
 

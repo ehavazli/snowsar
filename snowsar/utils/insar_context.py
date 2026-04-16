@@ -168,6 +168,15 @@ def build_insar_context(
         )
 
         dates = parse_unique_dates_from_hyp3_filenames(hyp3_tifs)
+
+        # Validate dates are non-empty
+        if not dates:
+            raise ValueError(
+                "No valid dates parsed from HyP3 filenames.\n"
+                f"  Files: {[str(Path(p).name) for p in hyp3_tifs[:5]]}"
+                + (f" ... ({len(hyp3_tifs)} total)" if len(hyp3_tifs) > 5 else "")
+            )
+
         footprint = footprint_from_geotiffs(hyp3_tifs)
 
         if not _has_nonempty_geometry(footprint):
