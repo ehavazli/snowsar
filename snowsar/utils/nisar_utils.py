@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import logging
 import posixpath
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
+
+if TYPE_CHECKING:
+    from rasterio import Affine
+    from rasterio.crs import CRS as RasterCRS
 
 import geopandas as gpd
 import h5py
@@ -19,6 +22,16 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------
+# Constants
+# -----------------------------
+# Maximum number of HDF5 keys to display in error messages
+_MAX_KEYS_TO_DISPLAY = 30
+
+# Default buffer around footprint for DEM downloads (degrees)
+_DEFAULT_DEM_BUFFER_DEG = 0.02
 
 
 # -----------------------------
@@ -74,7 +87,7 @@ def resolve_h5_path(
         if _h5_exists(f, c):
             return c
 
-    top_keys = list(f.keys())[:30]
+    top_keys = list(f.keys())[:_MAX_KEYS_TO_DISPLAY]
     raise KeyError(
         f"HDF5 path not found. Tried: {uniq}. Top-level keys: {top_keys}"
     )
@@ -85,6 +98,163 @@ def h5_get(
 ) -> Union[h5py.Dataset, h5py.Group]:
     """Convenience wrapper returning the dataset/group at a resolved path."""
     return f[resolve_h5_path(f, path)]
+
+
+def _read_geogrid_coords(
+    grp: h5py.Group,
+) -> Tuple[np.ndarray, np.ndarray, float, float, Optional[int]]:
+    """
+    Read coordinate arrays, spacing, and EPSG from a GUNW geogrid group.
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        HDF5 group containing xCoordinates, yCoordinates, and optionally
+        xCoordinateSpacing, yCoordinateSpacing, and projection attributes.
+
+    Returns
+    -------
+    x : np.ndarray
+        X coordinates (1D array)
+    y : np.ndarray
+        Y coordinates (1D array)
+    dx : float
+        X coordinate spacing (pixel size)
+    dy : float
+        Y coordinate spacing (pixel size)
+    epsg : int or None
+        EPSG code from projection attribute, or None if not available
+    """
+    x = np.array(grp["xCoordinates"][()])
+    y = np.array(grp["yCoordinates"][()])
+
+    # Read spacing or compute from coordinate arrays
+    if "xCoordinateSpacing" in grp:
+        dx = float(np.array(grp["xCoordinateSpacing"][()]).item())
+    else:
+        dx = float(x[1] - x[0])
+
+    if "yCoordinateSpacing" in grp:
+        dy = float(np.array(grp["yCoordinateSpacing"][()]).item())
+    else:
+        dy = float(y[1] - y[0])
+
+    # Read EPSG if available
+    epsg = None
+    if "projection" in grp:
+        try:
+            epsg = int(np.array(grp["projection"][()]).item())
+        except (ValueError, TypeError, AttributeError):
+            epsg = None
+
+    return x, y, dx, dy, epsg
+
+
+def _write_geotiff(
+    arr2d: np.ndarray,
+    out_path: Path,
+    *,
+    crs,
+    transform,
+    nodata=None,
+) -> None:
+    """
+    Write a 2D array to a GeoTIFF file.
+
+    Parameters
+    ----------
+    arr2d : np.ndarray
+        2D array to write
+    out_path : Path
+        Output file path
+    crs : CRS
+        Coordinate reference system
+    transform : Affine
+        Affine transform mapping pixel coords to spatial coords
+    nodata : float, optional
+        NoData value
+    """
+    try:
+        import rasterio
+    except ImportError as e:
+        raise ImportError("rasterio is required for GeoTIFF export.") from e
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "driver": "GTiff",
+        "height": arr2d.shape[0],
+        "width": arr2d.shape[1],
+        "count": 1,
+        "dtype": arr2d.dtype,
+        "crs": crs,
+        "transform": transform,
+        "nodata": nodata,
+        "tiled": True,
+        "compress": "deflate",
+    }
+    with rasterio.open(out_path, "w", **profile) as dst_ds:
+        dst_ds.write(arr2d, 1)
+
+
+def _warp_to_template(
+    src_arr: np.ndarray,
+    *,
+    src_transform,
+    src_crs,
+    dst_transform,
+    dst_crs,
+    dst_shape: Tuple[int, int],
+    resamp,
+    src_nodata=None,
+    dst_nodata=np.nan,
+) -> np.ndarray:
+    """
+    Warp a source array to match a destination grid template.
+
+    Parameters
+    ----------
+    src_arr : np.ndarray
+        Source array to warp
+    src_transform : Affine
+        Source affine transform
+    src_crs : CRS
+        Source coordinate reference system
+    dst_transform : Affine
+        Destination affine transform
+    dst_crs : CRS
+        Destination coordinate reference system
+    dst_shape : Tuple[int, int]
+        Destination shape (height, width)
+    resamp : Resampling
+        Resampling method
+    src_nodata : float, optional
+        Source nodata value
+    dst_nodata : float, default np.nan
+        Destination nodata value
+
+    Returns
+    -------
+    np.ndarray
+        Warped array matching destination grid
+    """
+    try:
+        from rasterio.warp import reproject
+    except ImportError as e:
+        raise ImportError("rasterio is required for warping.") from e
+
+    dst = np.full(dst_shape, dst_nodata, dtype=np.float32)
+    reproject(
+        source=src_arr.astype(np.float32, copy=False),
+        destination=dst,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=resamp,
+        src_nodata=src_nodata,
+        dst_nodata=dst_nodata,
+    )
+    return dst
 
 
 # -----------------------------
@@ -123,6 +293,7 @@ def gunw_connected_components_path(
 def gunw_coherence_magnitude_path(
     *, frequency: str = "A", pol: str = "HH"
 ) -> str:
+    """Return HDF5 path to coherence magnitude dataset in NISAR GUNW product."""
     frequency = frequency.upper()
     pol = pol.upper()
     return (
@@ -134,6 +305,7 @@ def gunw_coherence_magnitude_path(
 def gunw_ionosphere_phase_screen_path(
     *, frequency: str = "A", pol: str = "HH"
 ) -> str:
+    """Return HDF5 path to ionosphere phase screen dataset in NISAR GUNW product."""
     frequency = frequency.upper()
     pol = pol.upper()
     return (
@@ -156,7 +328,7 @@ def nisar_dates_from_gunw_h5(
     """
     gunw_h5 = Path(gunw_h5)
 
-    def _read_str(ds) -> str:
+    def _read_str(ds: h5py.Dataset) -> str:
         val = ds[()]
         if isinstance(val, bytes):
             return val.decode("utf-8", errors="ignore")
@@ -232,22 +404,7 @@ def nisar_footprint_from_gunw_h5(
             raise ValueError(
                 f"Missing xCoordinates/yCoordinates near raster path:\n  {raster_path}"
             )
-        x = np.array(grp["xCoordinates"][()])
-        y = np.array(grp["yCoordinates"][()])
-        if "xCoordinateSpacing" in grp:
-            dx = float(np.array(grp["xCoordinateSpacing"][()]).item())
-        else:
-            dx = float(x[1] - x[0])
-        if "yCoordinateSpacing" in grp:
-            dy = float(np.array(grp["yCoordinateSpacing"][()]).item())
-        else:
-            dy = float(y[1] - y[0])
-        epsg = None
-        if "projection" in grp:
-            try:
-                epsg = int(np.array(grp["projection"][()]).item())
-            except Exception:
-                epsg = None
+        x, y, dx, dy, epsg = _read_geogrid_coords(grp)
         crs_src = f"EPSG:{epsg}" if epsg else None
         mask = np.isfinite(arr)
         fill = ds.attrs.get("_FillValue", None)
@@ -255,7 +412,7 @@ def nisar_footprint_from_gunw_h5(
             try:
                 fill_val = float(fill)
                 mask &= arr != fill_val
-            except Exception:
+            except (ValueError, TypeError):
                 pass
 
     res_x = abs(dx)
@@ -384,8 +541,9 @@ def build_dataset_index(f: h5py.File) -> Dict[str, List[DatasetInfo]]:
     def _visitor(name: str, obj) -> None:
         if not isinstance(obj, h5py.Dataset):
             return
-        base = name.split("/")[-1]
-        parent = "/".join(name.split("/")[:-1])
+        parts = name.split("/")
+        base = parts[-1]
+        parent = "/".join(parts[:-1])
         full_path = ("/" + name) if not name.startswith("/") else name
         parent_path = (
             ("/" + parent)
@@ -587,56 +745,6 @@ def extract_gunw_layers_to_geotiff_batch(
         )
     user_resamp = resamp_map[resampling]
 
-    def _write_geotiff(
-        arr2d: np.ndarray,
-        out_path: Path,
-        *,
-        crs,
-        transform,
-        nodata=None,
-    ) -> None:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        profile = {
-            "driver": "GTiff",
-            "height": arr2d.shape[0],
-            "width": arr2d.shape[1],
-            "count": 1,
-            "dtype": arr2d.dtype,
-            "crs": crs,
-            "transform": transform,
-            "nodata": nodata,
-            "tiled": True,
-            "compress": "deflate",
-        }
-        with rasterio.open(out_path, "w", **profile) as dst_ds:
-            dst_ds.write(arr2d, 1)
-
-    def _warp_to_template(
-        src_arr: np.ndarray,
-        *,
-        src_transform,
-        src_crs,
-        dst_transform,
-        dst_crs,
-        dst_shape: Tuple[int, int],
-        resamp,
-        src_nodata=None,
-        dst_nodata=np.nan,
-    ) -> np.ndarray:
-        dst = np.full(dst_shape, dst_nodata, dtype=np.float32)
-        reproject(
-            source=src_arr.astype(np.float32, copy=False),
-            destination=dst,
-            src_transform=src_transform,
-            src_crs=src_crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=resamp,
-            src_nodata=src_nodata,
-            dst_nodata=dst_nodata,
-        )
-        return dst
-
     # Computed alias registry
     computed_aliases = {"totalTroposphere", "localIncidenceAngle"}
 
@@ -723,19 +831,9 @@ def extract_gunw_layers_to_geotiff_batch(
 
                 ds_ref = h5_get(f, template_info.path)
                 grp_ref = ds_ref.parent
-                x_ref = np.array(grp_ref["xCoordinates"][()])
-                y_ref = np.array(grp_ref["yCoordinates"][()])
-                dx_ref = (
-                    float(np.array(grp_ref["xCoordinateSpacing"][()]).item())
-                    if "xCoordinateSpacing" in grp_ref
-                    else float(x_ref[1] - x_ref[0])
-                )
-                dy_ref = (
-                    float(np.array(grp_ref["yCoordinateSpacing"][()]).item())
-                    if "yCoordinateSpacing" in grp_ref
-                    else float(y_ref[1] - y_ref[0])
-                )
-                epsg_ref = int(np.array(grp_ref["projection"][()]).item())
+                x_ref, y_ref, dx_ref, dy_ref, epsg_ref = _read_geogrid_coords(grp_ref)
+                if epsg_ref is None:
+                    raise ValueError("Template dataset missing projection/EPSG information")
                 src_crs_ref = CRS.from_epsg(epsg_ref)
 
                 res_x_ref = abs(dx_ref)
@@ -797,19 +895,9 @@ def extract_gunw_layers_to_geotiff_batch(
             grp_valid = ds_valid.parent
             arr_valid_native = ds_valid[()]
 
-            x_v = np.array(grp_valid["xCoordinates"][()])
-            y_v = np.array(grp_valid["yCoordinates"][()])
-            dx_v = (
-                float(np.array(grp_valid["xCoordinateSpacing"][()]).item())
-                if "xCoordinateSpacing" in grp_valid
-                else float(x_v[1] - x_v[0])
-            )
-            dy_v = (
-                float(np.array(grp_valid["yCoordinateSpacing"][()]).item())
-                if "yCoordinateSpacing" in grp_valid
-                else float(y_v[1] - y_v[0])
-            )
-            epsg_v = int(np.array(grp_valid["projection"][()]).item())
+            x_v, y_v, dx_v, dy_v, epsg_v = _read_geogrid_coords(grp_valid)
+            if epsg_v is None:
+                raise ValueError("Valid mask dataset missing projection/EPSG information")
             src_crs_v = CRS.from_epsg(epsg_v)
 
             res_x_v = abs(dx_v)
@@ -821,12 +909,17 @@ def extract_gunw_layers_to_geotiff_batch(
             fill_v = ds_valid.attrs.get("_FillValue", None)
 
             if warp:
-                assert (
-                    dst_transform is not None
-                    and dst_crs is not None
-                    and dst_width is not None
-                    and dst_height is not None
-                )
+                if (
+                    dst_transform is None
+                    or dst_crs is None
+                    or dst_width is None
+                    or dst_height is None
+                ):
+                    raise ValueError(
+                        "Warp template grid not properly initialized. "
+                        "This is likely a bug - dst_transform, dst_crs, dst_width, and dst_height "
+                        "should all be set when warp=True."
+                    )
                 out_valid_arr = _warp_to_template(
                     arr_valid_native,
                     src_transform=src_transform_v,
@@ -916,10 +1009,53 @@ def extract_gunw_layers_to_geotiff_batch(
                 else:
                     logger.info("Reusing cached DEM -> %s", dem_out)
 
-                # Keep per-file copy
+                # Warp DEM to match output grid and write
                 dem_copy = out_dir / f"{gunw_h5_path.stem}_DEM.tif"
                 if overwrite or (not dem_copy.exists()):
-                    shutil.copy2(dem_out, dem_copy)
+                    # Read raw DEM
+                    with rasterio.open(dem_out) as dem_src:
+                        dem_raw = dem_src.read(1)
+                        dem_src_transform = dem_src.transform
+                        dem_src_crs = dem_src.crs
+                        dem_nodata = dem_src.nodata
+
+                    # Determine output grid (warped or native)
+                    if warp:
+                        # Use warped template grid
+                        out_crs = dst_crs
+                        out_transform = dst_transform
+                        out_shape = (dst_height, dst_width)
+                    else:
+                        # Use native GUNW geogrid
+                        out_crs = src_crs_v
+                        out_transform = src_transform_v
+                        out_shape = arr_valid_native.shape
+
+                    # Warp DEM to output grid
+                    dem_warped = _warp_to_template(
+                        dem_raw,
+                        src_transform=dem_src_transform,
+                        src_crs=dem_src_crs,
+                        dst_transform=out_transform,
+                        dst_crs=out_crs,
+                        dst_shape=out_shape,
+                        resamp=Resampling.bilinear,
+                        src_nodata=float(dem_nodata) if dem_nodata is not None else None,
+                        dst_nodata=np.nan,
+                    )
+
+                    # Mask to valid data extent
+                    dem_warped[~unw_valid] = np.nan
+
+                    # Write warped DEM
+                    _write_geotiff(
+                        dem_warped.astype(np.float32),
+                        dem_copy,
+                        crs=out_crs,
+                        transform=out_transform,
+                        nodata=np.nan,
+                    )
+                    logger.info("Wrote warped DEM -> %s", dem_copy)
                 per_file["DEM"] = dem_copy
 
             # -----------------------------
@@ -935,19 +1071,9 @@ def extract_gunw_layers_to_geotiff_batch(
                 if arr.ndim != 2:
                     continue
 
-                x = np.array(grp["xCoordinates"][()])
-                y = np.array(grp["yCoordinates"][()])
-                dx = (
-                    float(np.array(grp["xCoordinateSpacing"][()]).item())
-                    if "xCoordinateSpacing" in grp
-                    else float(x[1] - x[0])
-                )
-                dy = (
-                    float(np.array(grp["yCoordinateSpacing"][()]).item())
-                    if "yCoordinateSpacing" in grp
-                    else float(y[1] - y[0])
-                )
-                epsg = int(np.array(grp["projection"][()]).item())
+                x, y, dx, dy, epsg = _read_geogrid_coords(grp)
+                if epsg is None:
+                    raise ValueError(f"Dataset {info.name} missing projection/EPSG information")
                 src_crs = CRS.from_epsg(epsg)
                 res_x = abs(dx)
                 res_y = abs(dy)
@@ -1265,7 +1391,7 @@ def download_dem_for_gunw_with_sardem(
     frequency: str = "A",
     pol: str = "HH",
     raster_path: Optional[str] = None,
-    buffer_deg: float = 0.02,
+    buffer_deg: float = _DEFAULT_DEM_BUFFER_DEG,
     data_source: str = "COP",
     output_format: str = "GTiff",
     output_type: str = "float32",
@@ -1355,7 +1481,7 @@ def dem_cache_path_for_gunw(
     frequency: str = "A",
     pol: str = "HH",
     raster_path: Optional[str] = None,
-    buffer_deg: float = 0.02,
+    buffer_deg: float = _DEFAULT_DEM_BUFFER_DEG,
     precision: int = 3,
     data_source: str = "COP",
     keep_egm: bool = False,
@@ -1477,8 +1603,27 @@ def _warp_to_grid_mem(
     return np.asarray(arr)
 
 
-def _make_rgi(grid_axes, values, method: str = "linear"):
-    """RegularGridInterpolator wrapper matching prep_nisar.py behavior."""
+def _make_rgi(
+    grid_axes: Sequence[np.ndarray],
+    values: np.ndarray,
+    method: str = "linear",
+):
+    """RegularGridInterpolator wrapper matching prep_nisar.py behavior.
+
+    Parameters
+    ----------
+    grid_axes : Sequence[np.ndarray]
+        Sequence of 1D arrays representing grid coordinates along each axis
+    values : np.ndarray
+        N-dimensional array of values on the grid
+    method : str, default "linear"
+        Interpolation method (e.g., "linear", "nearest")
+
+    Returns
+    -------
+    RegularGridInterpolator
+        Scipy interpolator object
+    """
     try:
         from scipy.interpolate import RegularGridInterpolator
     except Exception as e:
@@ -1529,7 +1674,7 @@ def _read_valid_unw_mask_full_geogrid(
     if fill is not None:
         try:
             valid &= unw != float(fill)
-        except Exception:
+        except (ValueError, TypeError):
             pass
     return valid
 
@@ -1914,7 +2059,7 @@ def interpolate_radargrid_cube_to_geogrid(
     frequency: str,
     pol: str,
     gunw_geogrid_group: str = "unwrappedInterferogram",
-) -> Tuple[np.ndarray, "rasterio.Affine", "rasterio.crs.CRS"]:
+) -> Tuple[np.ndarray, Affine, RasterCRS]:
     """
     Return (array, transform, crs) on the native GUNW geogrid for a radarGrid cube.
     Implemented by writing a temp GeoTIFF using interpolate_gunw_radargrid_cube_to_geotiff()
@@ -1950,7 +2095,7 @@ def interpolate_incidence_and_local_incidence(
     frequency: str,
     pol: str,
     gunw_geogrid_group: str = "unwrappedInterferogram",
-) -> Tuple[np.ndarray, np.ndarray, "rasterio.Affine", "rasterio.crs.CRS"]:
+) -> Tuple[np.ndarray, np.ndarray, Affine, RasterCRS]:
     """
     Return (incidenceAngle_2d, localIncidenceAngle_2d, transform, crs) on the native GUNW geogrid.
     """
