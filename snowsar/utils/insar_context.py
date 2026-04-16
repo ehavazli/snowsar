@@ -2,13 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union
 
 import geopandas as gpd
 import pandas as pd
 
 
 def _has_nonempty_geometry(gdf: gpd.GeoDataFrame) -> bool:
+    """
+    Check if GeoDataFrame has non-empty geometry.
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        GeoDataFrame to check
+
+    Returns
+    -------
+    bool
+        True if GeoDataFrame is non-empty, has geometry column, and at least
+        one non-empty geometry
+    """
     return (
         (not gdf.empty)
         and ("geometry" in gdf.columns)
@@ -19,7 +33,45 @@ def _has_nonempty_geometry(gdf: gpd.GeoDataFrame) -> bool:
 @dataclass(frozen=True)
 class InsarContext:
     """
-    Standardized output for downstream workflows (SNOTEL, plotting, etc.)
+    Standardized InSAR workflow context for downstream analysis.
+
+    Provides a unified interface for HyP3 and MintPy workflows, extracting
+    acquisition dates and valid-data footprint from processed InSAR products.
+
+    Attributes
+    ----------
+    source : str
+        Processing workflow: "hyp3" or "mintpy"
+    dates : List[pd.Timestamp]
+        Acquisition dates, normalized to midnight (00:00:00)
+    footprint : gpd.GeoDataFrame
+        Single-row GeoDataFrame with Polygon geometry representing valid data extent.
+        CRS is EPSG:4326 (WGS84 lat/lon).
+
+    Notes
+    -----
+    This dataclass is immutable (frozen=True) to ensure consistency across
+    analysis pipelines that consume InSAR context.
+
+    Examples
+    --------
+    >>> # HyP3 workflow
+    >>> ctx = build_insar_context(
+    ...     source="hyp3",
+    ...     hyp3_tifs=["S1_20201215_20201227_VV_unw.tif", "S1_20201227_20210108_VV_unw.tif"]
+    ... )
+    >>> len(ctx.dates)
+    3
+    >>> ctx.source
+    'hyp3'
+
+    >>> # MintPy workflow
+    >>> ctx = build_insar_context(
+    ...     source="mintpy",
+    ...     mintpy_timeseries_h5="geo_timeseries_ERA5_demErr.h5"
+    ... )
+    >>> ctx.footprint.crs
+    CRS.from_epsg(4326)
     """
 
     source: str  # "hyp3" or "mintpy"
@@ -37,28 +89,63 @@ def build_insar_context(
     mintpy_reference_slice: Optional[str] = None,
 ) -> InsarContext:
     """
-    Build (dates, footprint) using the correct workflow based on `source`.
+    Build InSAR workflow context (dates, footprint) from HyP3 or MintPy products.
 
-    Rules:
-      - source must be "hyp3" or "mintpy"
-      - hyp3 workflow uses ONLY hyp3_tifs
-      - mintpy workflow uses ONLY mintpy_timeseries_h5 (+ optional slice name)
-      - providing both hyp3 and mintpy inputs is an error
+    Factory function that routes to appropriate workflow-specific extractors based
+    on source parameter. Enforces mutual exclusivity between HyP3 and MintPy inputs.
 
     Parameters
     ----------
     source : str
-        "hyp3" or "mintpy"
-    hyp3_tifs : list[path]
-        HyP3 clipped GeoTIFFs (e.g., *unw_phase_clipped.tif)
-    mintpy_timeseries_h5 : path
-        MintPy geo_timeseries*.h5 file
+        Processing workflow: "hyp3" or "mintpy"
+    hyp3_tifs : Sequence[str or Path], optional
+        HyP3 GeoTIFF paths (e.g., *_unw_phase_clipped.tif).
+        Required if source="hyp3", must be None if source="mintpy".
+    mintpy_timeseries_h5 : str or Path, optional
+        MintPy geocoded timeseries HDF5 file (e.g., geo_timeseries*.h5).
+        Required if source="mintpy", must be None if source="hyp3".
     mintpy_reference_slice : str, optional
-        Slice name to use for footprint derivation; if None, uses first slice.
+        Slice name to use for MintPy footprint generation.
+        If None, uses first slice. Only used when source="mintpy".
 
     Returns
     -------
     InsarContext
+        Standardized context with source, dates, and footprint
+
+    Raises
+    ------
+    ValueError
+        If source is not "hyp3" or "mintpy", or if both hyp3_tifs and
+        mintpy_timeseries_h5 are provided, or if required inputs are missing,
+        or if footprint extraction returns empty geometry
+
+    Notes
+    -----
+    HyP3 and MintPy are mutually exclusive workflows:
+    - HyP3: dates extracted from filenames, footprint from raster masks
+    - MintPy: dates extracted from HDF5 slices, footprint from one time slice
+
+    Examples
+    --------
+    >>> # HyP3 workflow
+    >>> tifs = [
+    ...     "S1_20201215_20201227_VV_unw_phase_clipped.tif",
+    ...     "S1_20201227_20210108_VV_unw_phase_clipped.tif"
+    ... ]
+    >>> ctx = build_insar_context(source="hyp3", hyp3_tifs=tifs)
+    >>> len(ctx.dates)
+    3
+    >>> ctx.footprint.crs
+    CRS.from_epsg(4326)
+
+    >>> # MintPy workflow
+    >>> ctx = build_insar_context(
+    ...     source="mintpy",
+    ...     mintpy_timeseries_h5="geo_timeseries_ERA5_demErr.h5"
+    ... )
+    >>> ctx.source
+    'mintpy'
     """
     source = source.lower().strip()
     if source not in {"hyp3", "mintpy"}:
