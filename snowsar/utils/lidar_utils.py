@@ -290,6 +290,7 @@ def write_mintpy_array_as_geotiff(
         )
 
     out_tif_path = Path(out_tif_path)
+    out_tif_path.parent.mkdir(parents=True, exist_ok=True)
     dtype = np.float32 if np.issubdtype(input_array.dtype, np.floating) else input_array.dtype
     profile = {
         "driver": "GTiff",
@@ -1124,6 +1125,10 @@ def compute_pearson_correlation(
     >>> result['statistic']
     1.0
     """
+    # Validate on_invalid parameter first
+    if on_invalid not in {"raise", "nan"}:
+        raise ValueError("on_invalid must be either 'raise' or 'nan'.")
+
     from scipy.stats import pearsonr
 
     x_valid, y_valid = filter_finite_pairs(x, y)
@@ -1149,8 +1154,6 @@ def compute_pearson_correlation(
                 "reason": message,
             }
         raise ValueError(message)
-    if on_invalid not in {"raise", "nan"}:
-        raise ValueError("on_invalid must be either 'raise' or 'nan'.")
 
     result = pearsonr(x_valid, y_valid)
     return {
@@ -1194,6 +1197,21 @@ def cumulative_sum_through_date(
         raise ValueError("stack must have shape (time, length, width).")
     if stack.shape[0] != len(dates):
         raise ValueError("dates length must match the first dimension of stack.")
+
+    # Validate date format (YYYYMMDD)
+    import re
+    date_pattern = re.compile(r'^\d{8}$')
+    for idx, date in enumerate(dates):
+        if not date_pattern.match(date):
+            raise ValueError(
+                f"Invalid date format at index {idx}: '{date}'\n"
+                f"Expected YYYYMMDD format (e.g., '20201231')"
+            )
+    if not date_pattern.match(inclusive_end_date):
+        raise ValueError(
+            f"Invalid inclusive_end_date format: '{inclusive_end_date}'\n"
+            f"Expected YYYYMMDD format (e.g., '20201231')"
+        )
 
     selected_indices = [idx for idx, date in enumerate(dates) if date <= inclusive_end_date]
     if not selected_indices:
@@ -1296,6 +1314,31 @@ def subset_geotiff_by_bbox(
     west, east = sorted((float(lon_range[0]), float(lon_range[1])))
 
     with rasterio.open(geotiff_path) as src:
+        # Validate/transform bounds to match raster CRS
+        from rasterio.crs import CRS as RasterCRS
+        from rasterio.warp import transform_bounds
+
+        if src.crs is None:
+            raise ValueError(
+                f"Raster has no CRS defined: {geotiff_path}\n"
+                f"Cannot determine if lat/lon bounds are compatible."
+            )
+
+        # If raster is not in lat/lon, transform bounds
+        if str(src.crs).upper() != "EPSG:4326":
+            import warnings
+            warnings.warn(
+                f"Raster CRS is {src.crs}, not EPSG:4326.\n"
+                f"Transforming lat/lon bounds to raster CRS.",
+                UserWarning
+            )
+            # Transform from EPSG:4326 to raster CRS
+            west, south, east, north = transform_bounds(
+                RasterCRS.from_epsg(4326),
+                src.crs,
+                west, south, east, north
+            )
+
         window = from_bounds(west, south, east, north, src.transform)
         # Match MintPy subset indexing by flooring both window bounds instead of
         # rounding lengths, which can drop edge pixels on one side.
