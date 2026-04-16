@@ -127,10 +127,38 @@ def footprint_from_geotiffs(
 
     list_parts = []
     src_crs = None
+    first_crs_file = None
 
-    for tif in tif_paths:
+    for idx, tif in enumerate(tif_paths):
         with rasterio.open(tif) as src:
-            src_crs = src.crs
+            # Validate CRS exists
+            if src.crs is None:
+                if out_crs is not None:
+                    raise ValueError(
+                        f"Raster has no CRS but out_crs={out_crs} was requested.\n"
+                        f"  File: {tif}\n"
+                        f"  Cannot reproject from undefined CRS."
+                    )
+                # If out_crs is None, we can proceed but warn
+                import warnings
+                warnings.warn(
+                    f"Raster has no CRS defined: {tif}\n"
+                    f"  Geometries will have undefined CRS.",
+                    UserWarning
+                )
+
+            # Check CRS consistency across files
+            if idx == 0:
+                src_crs = src.crs
+                first_crs_file = tif
+            elif src.crs != src_crs:
+                raise ValueError(
+                    f"Mixed CRS detected in input GeoTIFFs:\n"
+                    f"  First file CRS: {src_crs} ({first_crs_file.name})\n"
+                    f"  Current file CRS: {src.crs} ({tif.name})\n"
+                    f"  All input rasters must have the same CRS before union."
+                )
+
             mask = src.read_masks(band)  # uint8 (0..255)
 
             shapes_generator = shapes(
