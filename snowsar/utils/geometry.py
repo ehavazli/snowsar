@@ -50,10 +50,12 @@ def get_valid_data_polygon_from_array(
         Coordinate reference system for output geometry
     hole_area_min : float, default 0.0
         Minimum area threshold for keeping holes in polygons.
-        Holes smaller than this are filled.
+        Holes smaller than this are filled. Units are in CRS native units squared
+        (e.g., square degrees for EPSG:4326, square meters for projected CRS).
     return_largest : bool, default True
         If True and multiple disconnected polygons exist, return only
-        the largest one. If False, return the MultiPolygon union.
+        the largest one. **WARNING:** This silently drops smaller disconnected
+        valid-data regions. Set to False to preserve all regions as MultiPolygon.
 
     Returns
     -------
@@ -94,6 +96,26 @@ def get_valid_data_polygon_from_array(
         raise ValueError(f"Step sizes must be non-zero, got x_step={x_step}, y_step={y_step}")
     if not np.isfinite([north, south, east, west, x_step, y_step]).all():
         raise ValueError("All coordinate parameters must be finite numbers")
+
+    # Validate that bounds + step sizes match array dimensions
+    nrows, ncols = array.shape
+    width_expected = abs(east - west) / abs(x_step)
+    height_expected = abs(north - south) / abs(y_step)
+
+    # Allow 1% tolerance for floating point precision
+    tolerance = 0.01
+    width_diff = abs(width_expected - ncols) / ncols
+    height_diff = abs(height_expected - nrows) / nrows
+
+    if width_diff > tolerance or height_diff > tolerance:
+        raise ValueError(
+            f"Array dimensions don't match bounds + step sizes:\n"
+            f"  Array shape: {array.shape} (rows={nrows}, cols={ncols})\n"
+            f"  Expected from bounds: width={(east-west)/x_step:.2f}, height={(north-south)/abs(y_step):.2f}\n"
+            f"  Bounds: west={west}, east={east}, north={north}, south={south}\n"
+            f"  Steps: x_step={x_step}, y_step={y_step}\n"
+            f"  Mismatch: width_diff={width_diff:.3%}, height_diff={height_diff:.3%}"
+        )
 
     xsize = float(abs(x_step))
     ysize = float(abs(y_step))
