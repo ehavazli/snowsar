@@ -14,25 +14,64 @@ def plot_snotel_data(
     reference_date: Union[str, pd.Timestamp],
     dates: List,
     *,
-    x_axis: str = "days_since_reference",  # notebook default
+    x_axis: str = "days_since_reference",
     title_left: str = "Daily SWE at 12 AM (cm)",
     title_right: str = "Mean and Std Dev of Δ SWE on acquisition dates",
     show_legend: bool = False,
 ):
     """
-    Notebook-style two-panel plot:
+    Create two-panel visualization of SNOTEL snow water equivalent (SWE) data.
 
-    Left:
-      - SWE time series for each station
-      - vertical dashed lines on acquisition dates
+    Generates a figure with:
+    - Left panel: Time series of SWE for each station with vertical lines marking acquisition dates
+    - Right panel: Mean and standard deviation of ΔSWE between consecutive acquisition dates
 
-    Right:
-      - mean and std dev of ΔSWE between consecutive acquisition dates
-      - computed across stations, per acquisition date (the "later" date)
+    Parameters
+    ----------
+    results : Dict[str, pd.DataFrame]
+        Dictionary mapping station names to DataFrames. Each DataFrame must contain:
+        - 'date_time_utc': datetime column
+        - 'value_cm': SWE measurements in cm
+        - 'days_since_reference': days relative to reference_date (if x_axis='days_since_reference')
+    reference_date : str or pd.Timestamp
+        Reference date for x-axis calculations. Accepts:
+        - "MM-DD" format (e.g., "10-01") anchored to acquisition year
+        - Any pandas-parseable date string (e.g., "2020-10-01")
+        - pd.Timestamp object
+    dates : List
+        Acquisition dates to mark with vertical lines. Will be converted to pd.Timestamp.
+    x_axis : str, default "days_since_reference"
+        X-axis units for left panel. Must be one of:
+        - "days_since_reference": days since reference_date
+        - "date": calendar dates
+    title_left : str, default "Daily SWE at 12 AM (cm)"
+        Title for left panel
+    title_right : str, default "Mean and Std Dev of Δ SWE on acquisition dates"
+        Title for right panel
+    show_legend : bool, default False
+        Whether to show station names in left panel legend
 
-    `reference_date` accepts either:
-      - "MM-DD" (anchored to acquisition year), or
-      - any pandas-parseable date string / Timestamp.
+    Raises
+    ------
+    ValueError
+        If results is empty, dates is empty, or x_axis is invalid
+
+    Examples
+    --------
+    >>> results = {
+    ...     "Station_A": pd.DataFrame({
+    ...         "date_time_utc": pd.date_range("2020-10-01", periods=100),
+    ...         "value_cm": np.random.rand(100) * 50,
+    ...         "days_since_reference": range(100)
+    ...     }),
+    ...     "Station_B": pd.DataFrame({
+    ...         "date_time_utc": pd.date_range("2020-10-01", periods=100),
+    ...         "value_cm": np.random.rand(100) * 45,
+    ...         "days_since_reference": range(100)
+    ...     })
+    ... }
+    >>> dates = ["2020-10-15", "2020-11-01", "2020-11-15"]
+    >>> plot_snotel_data(results, reference_date="10-01", dates=dates)
     """
     if not results:
         raise ValueError("results is empty")
@@ -40,6 +79,11 @@ def plot_snotel_data(
     dates = pd.to_datetime(dates).normalize()
     if len(dates) == 0:
         raise ValueError("dates is empty")
+
+    if x_axis not in {"days_since_reference", "date"}:
+        raise ValueError(
+            f"x_axis must be 'days_since_reference' or 'date', got '{x_axis}'"
+        )
 
     reference_year = pd.to_datetime(dates.min()).year
     if isinstance(reference_date, str):
@@ -61,12 +105,8 @@ def plot_snotel_data(
 
         if x_axis == "days_since_reference":
             x = df["days_since_reference"]
-        elif x_axis == "date":
+        else:  # x_axis == "date"
             x = pd.to_datetime(df["date_time_utc"]).dt.normalize()
-        else:
-            raise ValueError(
-                "x_axis must be 'days_since_reference' or 'date'"
-            )
 
         axes[0].plot(x, df["value_cm"], linestyle="-", label=site_name)
 
@@ -163,38 +203,83 @@ def make_footprint_station_map(
     tiles: str = "OpenStreetMap",
 ):
     """
-    Create an interactive Folium map with:
-      - footprint polygon(s) as GeoJSON
-      - SNOTEL station points as markers with popup "Name: ... - Code: ..."
+    Create an interactive Folium map with footprint polygon and SNOTEL stations.
+
+    Generates a web-based interactive map showing:
+    - InSAR footprint polygon(s) as a GeoJSON layer
+    - SNOTEL station locations as markers with name and code popups
+    - Layer control for toggling visibility
 
     Parameters
     ----------
-    footprint_gdf : GeoDataFrame
-        GeoDataFrame containing the footprint geometry (polygon/multipolygon).
-        Expected CRS: EPSG:4326 (lat/lon). If not, it will be reprojected.
-    snotel_sites : GeoDataFrame
+    footprint_gdf : gpd.GeoDataFrame
+        GeoDataFrame containing the footprint geometry (Polygon or MultiPolygon).
+        Will be automatically reprojected to EPSG:4326 if in a different CRS.
+    snotel_sites : gpd.GeoDataFrame
         GeoDataFrame with Point geometry and columns 'name' and 'code'.
-        Expected CRS: EPSG:4326 (lat/lon). If not, it will be reprojected.
-    zoom_start : int
-        Initial zoom.
-    footprint_name : str
-        Layer name for footprint.
-    marker_color : str
-        Folium marker color.
-    tiles : str
-        Folium tileset.
+        Will be automatically reprojected to EPSG:4326 if in a different CRS.
+        Can be None or empty to show only footprint.
+    zoom_start : int, default 8
+        Initial zoom level (0=world, 18=building level). Typical range: 6-12.
+    footprint_name : str, default "Valid Data Area"
+        Display name for footprint layer in layer control
+    marker_color : str, default "blue"
+        Folium marker color. Options: "red", "blue", "green", "purple",
+        "orange", "darkred", "lightred", "beige", "darkblue", "darkgreen",
+        "cadetblue", "darkpurple", "white", "pink", "lightblue", "lightgreen",
+        "gray", "black", "lightgray"
+    tiles : str, default "OpenStreetMap"
+        Basemap tileset. Common options: "OpenStreetMap", "Stamen Terrain",
+        "Stamen Toner", "CartoDB positron", "CartoDB dark_matter"
 
     Returns
     -------
     folium.Map
-        Map object displayable directly in a notebook cell.
+        Interactive map object. Displays automatically in Jupyter notebooks.
+        Can be saved to HTML with map.save("output.html").
+
+    Raises
+    ------
+    ValueError
+        If footprint_gdf is None or empty, or if zoom_start is out of valid range
+    ImportError
+        If folium package is not installed
+
+    Notes
+    -----
+    Requires folium package (optional dependency): pip install folium
+
+    Examples
+    --------
+    >>> footprint = gpd.GeoDataFrame(
+    ...     geometry=[Polygon([(-120, 38), (-120, 39), (-119, 39), (-119, 38)])],
+    ...     crs="EPSG:4326"
+    ... )
+    >>> stations = gpd.GeoDataFrame(
+    ...     {"name": ["Station A"], "code": ["ABC:01"]},
+    ...     geometry=[Point(-119.5, 38.5)],
+    ...     crs="EPSG:4326"
+    ... )
+    >>> m = make_footprint_station_map(footprint, stations, zoom_start=10)
+    >>> m.save("map.html")  # Save to file
     """
-    import folium  # keep optional dependency local
+    try:
+        import folium
+    except ImportError as e:
+        raise ImportError(
+            "folium is required for make_footprint_station_map. "
+            "Install with: pip install folium"
+        ) from e
 
     if footprint_gdf is None or footprint_gdf.empty:
         raise ValueError("footprint_gdf is empty")
 
-    # Ensure lat/lon CRS for Folium
+    if not (0 <= zoom_start <= 18):
+        raise ValueError(
+            f"zoom_start must be between 0 and 18, got {zoom_start}"
+        )
+
+    # Reproject to EPSG:4326 (lat/lon) for Folium
     fp = footprint_gdf
     if fp.crs is not None and str(fp.crs) != "EPSG:4326":
         fp = fp.to_crs("EPSG:4326")
