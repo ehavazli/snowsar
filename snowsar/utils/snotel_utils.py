@@ -11,12 +11,65 @@ from shapely.ops import transform as shp_transform
 
 logger = logging.getLogger(__name__)
 
+# Constants
+_INCHES_TO_CM = 2.54
+
 
 def f_to_c(temp_f: float) -> float:
+    """
+    Convert temperature from Fahrenheit to Celsius.
+
+    Parameters
+    ----------
+    temp_f : float
+        Temperature in degrees Fahrenheit
+
+    Returns
+    -------
+    float
+        Temperature in degrees Celsius
+    """
     return (temp_f - 32.0) * 5.0 / 9.0
 
 
 def fetch_snotel_sites(wsdlurl: str) -> gpd.GeoDataFrame:
+    """
+    Fetch SNOTEL station metadata from CUAHSI WaterOneFlow web service.
+
+    Retrieves all available SNOTEL sites from the specified WSDL URL and
+    returns them as a GeoDataFrame with standardized columns. Handles various
+    metadata schemas and ensures consistent 'code', 'name', and 'geometry' columns.
+
+    Parameters
+    ----------
+    wsdlurl : str
+        CUAHSI WaterOneFlow WSDL endpoint URL. Example:
+        "https://hydroportal.cuahsi.org/Snotel/cuahsi_1_1.asmx?WSDL"
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        GeoDataFrame with SNOTEL sites in EPSG:4326. Columns:
+        - code: station identifier (str)
+        - name: station name (str)
+        - geometry: Point location
+
+    Raises
+    ------
+    ValueError
+        If response lacks 'location' column or required metadata
+    ConnectionError
+        If unable to connect to WSDL service
+
+    Examples
+    --------
+    >>> wsdl = "https://hydroportal.cuahsi.org/Snotel/cuahsi_1_1.asmx?WSDL"
+    >>> sites = fetch_snotel_sites(wsdl)
+    >>> len(sites)
+    854
+    >>> sites.crs
+    CRS.from_epsg(4326)
+    """
     sites = ulmo.cuahsi.wof.get_sites(wsdlurl)
     df = pd.DataFrame.from_dict(sites, orient="index")
 
@@ -84,7 +137,22 @@ def fetch_snotel_sites(wsdlurl: str) -> gpd.GeoDataFrame:
 
 def _reproject_geometry(geom, src_crs, dst_crs):
     """
-    Reproject a single shapely geometry from src_crs -> dst_crs.
+    Reproject a single Shapely geometry between coordinate reference systems.
+
+    Parameters
+    ----------
+    geom : shapely.geometry
+        Geometry to reproject (Point, Polygon, etc.)
+    src_crs : str or CRS
+        Source coordinate reference system
+    dst_crs : str or CRS
+        Destination coordinate reference system
+
+    Returns
+    -------
+    shapely.geometry
+        Reprojected geometry. Returns original geometry if src_crs == dst_crs
+        or if either CRS is None. Returns None if input geometry is None.
     """
     if geom is None:
         return None
@@ -114,11 +182,37 @@ def filter_sites_by_polygon(
     footprint_crs=None,
 ) -> gpd.GeoDataFrame:
     """
-    Filter sites that intersect the footprint polygon.
+    Filter SNOTEL sites to those intersecting a footprint polygon.
 
-    Key fix: handles CRS mismatch safely.
-    - If footprint_crs is provided and differs from sites_gdf.crs, we reproject sites.
-    - If footprint_crs is None, we assume footprint_geom is already in sites_gdf.crs.
+    Spatially filters sites by intersection with a polygon boundary. Handles
+    CRS mismatches by reprojecting sites to match the footprint CRS when needed.
+
+    Parameters
+    ----------
+    sites_gdf : gpd.GeoDataFrame
+        SNOTEL sites with Point geometry (typically from fetch_snotel_sites)
+    footprint_geom : shapely.geometry
+        Polygon or MultiPolygon geometry defining the area of interest
+    footprint_crs : str or CRS, optional
+        Coordinate reference system of footprint_geom. If provided and different
+        from sites_gdf.crs, sites will be reprojected to footprint_crs before
+        filtering. If None, assumes footprint_geom is already in sites_gdf.crs.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Filtered sites that intersect the footprint. Returns empty GeoDataFrame
+        if no sites intersect. CRS matches footprint_crs if provided, otherwise
+        matches input sites_gdf.crs.
+
+    Examples
+    --------
+    >>> from shapely.geometry import Polygon
+    >>> sites = fetch_snotel_sites(wsdl_url)
+    >>> footprint = Polygon([(-120, 38), (-120, 39), (-119, 39), (-119, 38)])
+    >>> filtered = filter_sites_by_polygon(sites, footprint, footprint_crs="EPSG:4326")
+    >>> len(filtered) < len(sites)
+    True
     """
     if sites_gdf.empty:
         return sites_gdf.copy()
@@ -148,14 +242,73 @@ def fetch_snotel_timeseries(
     include_temperature: bool = True,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Fetch SNOTEL SWE (WTEQ_H) and optionally hourly TOBS_H for multiple sites.
+    Fetch SNOTEL snow water equivalent and temperature time series for multiple sites.
 
-    Returns dict[site_name] -> DataFrame with:
-      - date_time_utc
-      - days_since_reference
-      - value_cm
-      - temp_c  (if include_temperature, else NaN)
-      - site_loc
+    Retrieves hourly SWE (WTEQ_H) and optionally temperature (TOBS_H) data from
+    CUAHSI WaterOneFlow service for all provided sites. Filters to a specific
+    hour of day, converts units, and computes days since reference date.
+
+    Parameters
+    ----------
+    snotel_sites : pd.DataFrame
+        DataFrame with SNOTEL sites. Must contain columns:
+        - code: site identifier for API queries
+        - name: site name for result keys
+        - geometry: Point geometry (shapely)
+    wsdlurl : str
+        CUAHSI WaterOneFlow WSDL endpoint URL
+    start_date : str
+        Start date in pandas-parseable format (e.g., "2020-10-01")
+    end_date : str
+        End date in pandas-parseable format (e.g., "2021-05-31")
+    reference_date : str, default "12-01"
+        Reference date in "MM-DD" format for computing days_since_reference.
+        Year is taken from start_date.
+    obs_hour : int, default 0
+        Hour of day (0-23) to extract from hourly data. Default 0 = midnight.
+    include_temperature : bool, default True
+        Whether to fetch and include temperature (TOBS_H) data. If False or
+        if temperature data unavailable, temp_c column will contain NaN.
+
+    Returns
+    -------
+    Dict[str, pd.DataFrame]
+        Dictionary mapping site names to DataFrames. Each DataFrame contains:
+        - date_time_utc: datetime (pd.Timestamp)
+        - days_since_reference: days since reference_date (int)
+        - value_cm: snow water equivalent in cm (float32)
+        - temp_c: temperature in Celsius (float32, NaN if unavailable)
+        - site_loc: station Point geometry (shapely)
+
+        Sites with no data or errors are omitted from results.
+
+    Raises
+    ------
+    ValueError
+        If snotel_sites is missing required columns ('code', 'name', 'geometry')
+        or if obs_hour is not in range [0, 23]
+
+    Notes
+    -----
+    - Filters to quality_control_level_code == "1" when available
+    - Converts SWE from inches to cm using 1 inch = 2.54 cm
+    - Converts temperature from Fahrenheit to Celsius
+    - Logs warnings for sites with errors or missing data
+    - Handles duplicate site names by appending " (code)" or " #N"
+
+    Examples
+    --------
+    >>> sites = fetch_snotel_sites(wsdl_url)
+    >>> filtered = filter_sites_by_polygon(sites, footprint, footprint_crs="EPSG:4326")
+    >>> results = fetch_snotel_timeseries(
+    ...     filtered, wsdl_url,
+    ...     start_date="2020-10-01",
+    ...     end_date="2021-05-31",
+    ...     reference_date="10-01",
+    ...     obs_hour=0
+    ... )
+    >>> for site_name, df in results.items():
+    ...     print(f"{site_name}: {len(df)} records")
     """
     required = {"code", "name", "geometry"}
     missing = required - set(snotel_sites.columns)
@@ -227,7 +380,7 @@ def fetch_snotel_timeseries(
             swe_df["value"] = pd.to_numeric(
                 swe_df["value"], errors="coerce"
             ).astype("float32")
-            swe_df["value_cm"] = swe_df["value"] * 2.54
+            swe_df["value_cm"] = swe_df["value"] * _INCHES_TO_CM
 
             swe_at_hour = swe_df[
                 swe_df["date_time_utc"].dt.hour == obs_hour
