@@ -19,6 +19,10 @@ from rasterio.warp import reproject
 
 _DATE_PATTERN = re.compile(r"(?P<year>\d{4})(?P<month>[A-Za-z]{3})(?P<day>\d{1,2})(?:-(?P<end_day>\d{1,2}))?")
 
+# WGS84 ellipsoid constants
+_WGS84_SEMI_MAJOR_AXIS_M = 6378137.0  # Semi-major axis (a) in meters
+_WGS84_ECCENTRICITY_SQUARED = 6.69437999014e-3  # First eccentricity squared (e²)
+
 
 @dataclass(frozen=True)
 class MintPyGrid:
@@ -34,27 +38,89 @@ class MintPyGrid:
 
 
 def list_hdf5_root_datasets(h5_path: str | Path) -> List[str]:
-    """List root-level datasets in an HDF5 file."""
+    """
+    List root-level datasets in an HDF5 file.
+
+    Parameters
+    ----------
+    h5_path : str or Path
+        Path to HDF5 file
+
+    Returns
+    -------
+    List[str]
+        Sorted list of dataset names at root level (excludes groups)
+    """
     h5_path = Path(h5_path)
     with h5py.File(h5_path, "r") as h5:
         return sorted([key for key in h5.keys() if isinstance(h5[key], h5py.Dataset)])
 
 
 def read_hdf5_root_attributes(h5_path: str | Path) -> Dict[str, Any]:
-    """Read root-level HDF5 attributes with bytes decoded to strings."""
+    """
+    Read root-level HDF5 attributes with bytes decoded to strings.
+
+    Parameters
+    ----------
+    h5_path : str or Path
+        Path to HDF5 file
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary of attribute name to value (bytes decoded to str)
+    """
     h5_path = Path(h5_path)
     with h5py.File(h5_path, "r") as h5:
         return {key: _decode_attr(value) for key, value in h5.attrs.items()}
 
 
 def _decode_attr(value: Any) -> Any:
+    """
+    Decode HDF5 attribute value, converting bytes to strings.
+
+    Parameters
+    ----------
+    value : Any
+        HDF5 attribute value
+
+    Returns
+    -------
+    Any
+        Decoded value (str if input was bytes/bytearray, otherwise unchanged)
+    """
     if isinstance(value, (bytes, bytearray)):
         return value.decode()
     return value
 
 
 def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
-    """Read a regular MintPy geocoded grid definition from attributes or lat/lon datasets."""
+    """
+    Read MintPy geocoded grid definition from HDF5 file.
+
+    Extracts grid parameters from either:
+    1. Root attributes (X_FIRST, X_STEP, Y_FIRST, Y_STEP, LENGTH, WIDTH), or
+    2. latitude/longitude datasets (derives step sizes from median differences)
+
+    Parameters
+    ----------
+    mintpy_timeseries_path : str or Path
+        Path to MintPy geocoded timeseries HDF5 file (e.g., geo_timeseries*.h5)
+
+    Returns
+    -------
+    MintPyGrid
+        Grid definition with length, width, coordinates, transform, CRS, and attributes
+
+    Raises
+    ------
+    ValueError
+        If file lacks required grid attributes/datasets, or if lat/lon grid is not regular
+
+    Notes
+    -----
+    Assumes EPSG:4326 (WGS84 lat/lon) coordinate reference system.
+    """
     mintpy_timeseries_path = Path(mintpy_timeseries_path)
 
     with h5py.File(mintpy_timeseries_path, "r") as h5:
@@ -110,7 +176,28 @@ def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
 
 
 def get_geocoded_hdf5_grid(h5_path: str | Path) -> MintPyGrid:
-    """Read a regular geocoded HDF5 grid definition from root attributes."""
+    """
+    Read geocoded HDF5 grid definition from root attributes.
+
+    Parameters
+    ----------
+    h5_path : str or Path
+        Path to geocoded HDF5 file (e.g., geometryGeo.h5)
+
+    Returns
+    -------
+    MintPyGrid
+        Grid definition with length, width, coordinates, transform, CRS, and attributes
+
+    Raises
+    ------
+    ValueError
+        If required grid attributes (X_FIRST, X_STEP, Y_FIRST, Y_STEP, LENGTH, WIDTH) are missing
+
+    Notes
+    -----
+    Assumes EPSG:4326 (WGS84 lat/lon) coordinate reference system.
+    """
     h5_path = Path(h5_path)
     with h5py.File(h5_path, "r") as h5:
         attrs = {key: _decode_attr(value) for key, value in h5.attrs.items()}
@@ -152,7 +239,47 @@ def write_mintpy_array_as_geotiff(
     description: str = "Layer on MintPy geocoded grid",
     extra_tags: Dict[str, Any] | None = None,
 ) -> Path:
-    """Write an array aligned to a MintPy grid as a geocoded GeoTIFF."""
+    """
+    Write a 2D array aligned to MintPy grid as a geocoded GeoTIFF.
+
+    Exports array to GeoTIFF with proper georeferencing, compression, and metadata
+    derived from a MintPy timeseries file.
+
+    Parameters
+    ----------
+    input_array : np.ndarray
+        2D array to write (shape must match MintPy grid LENGTH × WIDTH)
+    mintpy_timeseries_path : str or Path
+        Path to MintPy timeseries file providing grid definition
+    out_tif_path : str or Path
+        Output GeoTIFF path
+    nodata : float, default np.nan
+        NoData value for output
+    compress : str, default "deflate"
+        Compression method ("deflate", "lzw", "zstd", etc.)
+    predictor : int, default 3
+        Predictor for compression (3 = floating point predictor)
+    bigtiff : str, default "IF_SAFER"
+        BigTIFF mode ("YES", "NO", "IF_NEEDED", "IF_SAFER")
+    creation_overviews : bool, default False
+        Whether to build overviews (pyramids)
+    overview_levels : Sequence[int], default (2, 4, 8, 16)
+        Overview decimation levels
+    description : str, default "Layer on MintPy geocoded grid"
+        Band description
+    extra_tags : Dict[str, Any], optional
+        Additional GeoTIFF tags to write
+
+    Returns
+    -------
+    Path
+        Path to created GeoTIFF file
+
+    Raises
+    ------
+    ValueError
+        If input_array is not 2D or shape doesn't match MintPy grid
+    """
     if input_array.ndim != 2:
         raise ValueError("input_array must be 2D (LENGTH x WIDTH).")
 
@@ -218,7 +345,40 @@ def resample_geotiff_to_mintpy_grid(
     resampling: Resampling = Resampling.bilinear,
     output_description: str = "LIDAR resampled to MintPy geocoded grid",
 ) -> np.ndarray | Path:
-    """Resample a raster onto a MintPy geocoded grid with nodata-aware reprojection."""
+    """
+    Resample raster onto MintPy geocoded grid with nodata-aware reprojection.
+
+    Reprojects and resamples an external raster to match the grid of a MintPy
+    timeseries file, handling nodata values correctly.
+
+    Parameters
+    ----------
+    geotiff_path : str or Path
+        Path to input GeoTIFF to resample
+    mintpy_timeseries_path : str or Path
+        Path to MintPy timeseries defining target grid
+    output_path : str or Path, optional
+        Output GeoTIFF path (used only if write_output=True).
+        If None, defaults to "resampled_{input_name}.tif"
+    write_output : bool, default False
+        If True, write resampled array to GeoTIFF and return Path.
+        If False, return resampled array without writing.
+    resampling : Resampling, default Resampling.bilinear
+        Resampling method (bilinear, cubic, nearest, etc.)
+    output_description : str, default "LIDAR resampled to MintPy geocoded grid"
+        Band description for output GeoTIFF
+
+    Returns
+    -------
+    np.ndarray or Path
+        If write_output=False: resampled array (float32)
+        If write_output=True: Path to created GeoTIFF
+
+    Raises
+    ------
+    ValueError
+        If input GeoTIFF has no CRS defined
+    """
     geotiff_path = Path(geotiff_path)
     grid = get_mintpy_grid(mintpy_timeseries_path)
     destination = np.full((grid.length, grid.width), np.nan, dtype=np.float32)
@@ -260,7 +420,31 @@ def resample_geotiff_to_mintpy_grid(
 
 
 def extract_start_date_str(path: str | Path) -> str:
-    """Extract a YYYYMMDD start date from names like 2023Apr09 or 2023May11-12."""
+    """
+    Extract YYYYMMDD start date from filename with format like 2023Apr09 or 2023May11-12.
+
+    Parameters
+    ----------
+    path : str or Path
+        File path or name containing date token
+
+    Returns
+    -------
+    str
+        Start date in YYYYMMDD format
+
+    Raises
+    ------
+    ValueError
+        If no date token found in path
+
+    Examples
+    --------
+    >>> extract_start_date_str("snow_2023Apr09_data.tif")
+    '20230409'
+    >>> extract_start_date_str("data_2023May11-12.tif")
+    '20230511'
+    """
     match = _DATE_PATTERN.search(str(path))
     if not match:
         raise ValueError(f"No date token found in: {path}")
@@ -277,7 +461,39 @@ def read_geotiff_stack_sorted_by_date(
     dtype: str = "float32",
     strict_same_grid: bool = True,
 ) -> Tuple[List[str], np.ndarray, Dict[str, Any]]:
-    """Read matching GeoTIFFs into a date-sorted stack."""
+    """
+    Read matching GeoTIFFs into a date-sorted 3D stack.
+
+    Finds GeoTIFFs matching pattern, extracts dates from filenames, sorts by date,
+    and reads into 3D array with nodata handling.
+
+    Parameters
+    ----------
+    pattern : str
+        Glob pattern for GeoTIFF files (e.g., "data/*2023*.tif")
+    dtype : str, default "float32"
+        NumPy dtype for output array
+    strict_same_grid : bool, default True
+        If True, verify all files have identical CRS and transform
+
+    Returns
+    -------
+    Tuple[List[str], np.ndarray, Dict[str, Any]]
+        - List of YYYYMMDD date strings (sorted)
+        - 3D array with shape (time, height, width)
+        - Metadata dict with keys: profile, transform, crs, paths
+
+    Raises
+    ------
+    FileNotFoundError
+        If no files match pattern
+    ValueError
+        If files have mismatched shapes or (if strict) CRS/transforms
+
+    Notes
+    -----
+    Masked pixels are converted to NaN in output array.
+    """
     paths = sorted(glob.glob(pattern, recursive=True))
     if not paths:
         raise FileNotFoundError(f"No files matched pattern: {pattern}")
@@ -340,7 +556,29 @@ def build_lidar_timeseries_h5(
 
 
 def filter_finite_pairs(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Return flattened finite-value pairs from two same-shaped arrays."""
+    """
+    Return flattened finite-value pairs from two same-shaped arrays.
+
+    Filters out NaN and inf values, retaining only positions where both arrays
+    have finite values.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        First array
+    y : np.ndarray
+        Second array (must have same shape as x)
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Flattened 1D arrays containing only paired finite values
+
+    Raises
+    ------
+    ValueError
+        If array shapes don't match
+    """
     if x.shape != y.shape:
         raise ValueError(f"Array shapes must match, got {x.shape} and {y.shape}.")
     mask = np.isfinite(x) & np.isfinite(y)
@@ -351,7 +589,26 @@ def read_geometry_datasets(
     geometry_h5_path: str | Path,
     dataset_names: Sequence[str],
 ) -> Dict[str, np.ndarray]:
-    """Read selected root-level datasets from a MintPy geometry HDF5 file."""
+    """
+    Read selected root-level datasets from MintPy geometry HDF5 file.
+
+    Parameters
+    ----------
+    geometry_h5_path : str or Path
+        Path to MintPy geometry file (e.g., geometryGeo.h5, geometryRadar.h5)
+    dataset_names : Sequence[str]
+        Names of datasets to read (e.g., ["incidenceAngle", "azimuthAngle"])
+
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary mapping dataset names to arrays
+
+    Raises
+    ------
+    KeyError
+        If any requested dataset is not found in file
+    """
     geometry_h5_path = Path(geometry_h5_path)
     arrays: Dict[str, np.ndarray] = {}
     with h5py.File(geometry_h5_path, "r") as h5:
@@ -445,11 +702,29 @@ def los_unit_vector_from_inc_azimuth(
     azimuth_deg: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Build the MintPy LOS unit vector in local ENU.
+    Build line-of-sight (LOS) unit vector in local East-North-Up frame from angles.
 
-    Assumes MintPy geometry definition:
-    - incidenceAngle is measured from vertical at the target.
-    - azimuthAngle is measured from north with anti-clockwise positive.
+    Converts InSAR geometry angles to a 3D unit vector pointing along the radar
+    line of sight in the local ENU coordinate system.
+
+    Parameters
+    ----------
+    incidence_deg : np.ndarray
+        Incidence angle in degrees, measured from vertical (0° = nadir)
+    azimuth_deg : np.ndarray
+        Azimuth angle in degrees, measured clockwise from north (0° = north)
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        Unit vector components (east, north, up) in local ENU frame
+
+    Notes
+    -----
+    Follows MintPy geometry convention:
+    - incidenceAngle: angle from vertical at target
+    - azimuthAngle: measured from north with counter-clockwise positive
+    - Result points FROM satellite TO ground (negative up component)
     """
     theta = np.deg2rad(incidence_deg)
     psi = np.deg2rad(azimuth_deg)
@@ -466,17 +741,33 @@ def llh_to_ecef(
     lat_deg: np.ndarray,
     height_m: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert lon/lat/height to ECEF on WGS84."""
-    wgs84_a = 6378137.0
-    wgs84_e2 = 6.69437999014e-3
+    """
+    Convert geodetic coordinates (lon/lat/height) to Earth-Centered Earth-Fixed (ECEF).
+
+    Uses WGS84 ellipsoid model for conversion.
+
+    Parameters
+    ----------
+    lon_deg : np.ndarray
+        Longitude in degrees
+    lat_deg : np.ndarray
+        Latitude in degrees
+    height_m : np.ndarray
+        Height above ellipsoid in meters
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        ECEF coordinates (x, y, z) in meters
+    """
     lon = np.deg2rad(lon_deg)
     lat = np.deg2rad(lat_deg)
     sin_lat, cos_lat = np.sin(lat), np.cos(lat)
     sin_lon, cos_lon = np.sin(lon), np.cos(lon)
-    radius = wgs84_a / np.sqrt(1.0 - wgs84_e2 * sin_lat * sin_lat)
+    radius = _WGS84_SEMI_MAJOR_AXIS_M / np.sqrt(1.0 - _WGS84_ECCENTRICITY_SQUARED * sin_lat * sin_lat)
     x = (radius + height_m) * cos_lat * cos_lon
     y = (radius + height_m) * cos_lat * sin_lon
-    z = (radius * (1.0 - wgs84_e2) + height_m) * sin_lat
+    z = (radius * (1.0 - _WGS84_ECCENTRICITY_SQUARED) + height_m) * sin_lat
     return x, y, z
 
 
@@ -488,7 +779,32 @@ def ecef_to_enu(
     lat0_deg: np.ndarray,
     h0_m: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert ECEF coordinates to local ENU relative to per-pixel reference points."""
+    """
+    Convert ECEF coordinates to local East-North-Up (ENU) frame.
+
+    Transforms ECEF coordinates relative to per-pixel reference points into
+    local ENU tangent plane coordinates.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        ECEF X coordinates in meters
+    y : np.ndarray
+        ECEF Y coordinates in meters
+    z : np.ndarray
+        ECEF Z coordinates in meters
+    lon0_deg : np.ndarray
+        Reference longitude in degrees for each point
+    lat0_deg : np.ndarray
+        Reference latitude in degrees for each point
+    h0_m : np.ndarray
+        Reference height in meters for each point
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        ENU coordinates (east, north, up) in meters
+    """
     x0, y0, z0 = llh_to_ecef(lon0_deg, lat0_deg, h0_m)
     dx = x - x0
     dy = y - y0
@@ -510,7 +826,33 @@ def surface_normal_from_geometry(
     latitude_deg: np.ndarray,
     height_m: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Estimate unit surface normals from central differences on a geocoded MintPy grid."""
+    """
+    Estimate unit surface normals from DEM using central differences.
+
+    Computes terrain surface normals in local ENU frame by taking central
+    differences on a geocoded grid, converting to ECEF, then to ENU.
+
+    Parameters
+    ----------
+    longitude_deg : np.ndarray
+        2D longitude array in degrees
+    latitude_deg : np.ndarray
+        2D latitude array in degrees
+    height_m : np.ndarray
+        2D height/elevation array in meters
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray]
+        Unit normal vector components (east, north, up) in local ENU frame.
+        Edge pixels (first/last row/column) are set to NaN.
+
+    Notes
+    -----
+    - Uses central differences with periodic boundary from np.roll
+    - Normals are flipped to point upward (positive up component)
+    - Edge pixels are invalidated due to central difference scheme
+    """
     lon_xp = np.roll(longitude_deg, -1, axis=1)
     lat_xp = np.roll(latitude_deg, -1, axis=1)
     h_xp = np.roll(height_m, -1, axis=1)
@@ -740,7 +1082,48 @@ def compute_pearson_correlation(
     min_points: int = 3,
     on_invalid: str = "raise",
 ) -> Dict[str, Any]:
-    """Compute a guarded Pearson correlation on finite paired samples."""
+    """
+    Compute Pearson correlation coefficient on finite paired samples with validation.
+
+    Filters out NaN/inf values and checks for sufficient sample size and variance
+    before computing correlation.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        First array (any shape, will be flattened)
+    y : np.ndarray
+        Second array (must have same shape as x)
+    min_points : int, default 3
+        Minimum number of finite paired samples required
+    on_invalid : str, default "raise"
+        How to handle invalid inputs:
+        - "raise": raise ValueError
+        - "nan": return dict with NaN values and valid=False
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary with keys:
+        - count: number of finite paired samples (int)
+        - statistic: Pearson correlation coefficient (float, or NaN if invalid)
+        - pvalue: two-tailed p-value (float, or NaN if invalid)
+        - valid: whether correlation is valid (bool)
+        - reason: explanation if invalid (str, empty if valid)
+
+    Raises
+    ------
+    ValueError
+        If insufficient samples or constant arrays (when on_invalid="raise")
+
+    Examples
+    --------
+    >>> x = np.array([1, 2, 3, 4, 5])
+    >>> y = np.array([2, 4, 6, 8, 10])
+    >>> result = compute_pearson_correlation(x, y)
+    >>> result['statistic']
+    1.0
+    """
     from scipy.stats import pearsonr
 
     x_valid, y_valid = filter_finite_pairs(x, y)
@@ -784,7 +1167,29 @@ def cumulative_sum_through_date(
     dates: Sequence[str],
     inclusive_end_date: str,
 ) -> np.ndarray:
-    """Sum a stack through an inclusive YYYYMMDD cutoff."""
+    """
+    Compute cumulative sum of stack through an inclusive YYYYMMDD cutoff date.
+
+    Parameters
+    ----------
+    stack : np.ndarray
+        3D array with shape (time, length, width)
+    dates : Sequence[str]
+        List of YYYYMMDD date strings, one per time slice
+    inclusive_end_date : str
+        Cutoff date in YYYYMMDD format (inclusive)
+
+    Returns
+    -------
+    np.ndarray
+        2D array (length, width) with nansum through cutoff date
+
+    Raises
+    ------
+    ValueError
+        If stack is not 3D, if dates length doesn't match time dimension,
+        or if no dates found on or before cutoff
+    """
     if stack.ndim != 3:
         raise ValueError("stack must have shape (time, length, width).")
     if stack.shape[0] != len(dates):
@@ -856,7 +1261,35 @@ def subset_geotiff_by_bbox(
     lat_range: Tuple[float, float],
     lon_range: Tuple[float, float],
 ) -> Path:
-    """Crop a geocoded GeoTIFF to a lon/lat bounding box and write a valid GeoTIFF."""
+    """
+    Crop geocoded GeoTIFF to longitude/latitude bounding box.
+
+    Parameters
+    ----------
+    geotiff_path : str or Path
+        Path to input GeoTIFF
+    output_path : str or Path
+        Path for output cropped GeoTIFF
+    lat_range : Tuple[float, float]
+        Latitude bounds (min, max or max, min - will be sorted)
+    lon_range : Tuple[float, float]
+        Longitude bounds (min, max or max, min - will be sorted)
+
+    Returns
+    -------
+    Path
+        Path to created subset GeoTIFF
+
+    Raises
+    ------
+    ValueError
+        If bounding box doesn't overlap input raster
+
+    Notes
+    -----
+    Uses floor-based window indexing to match MintPy subsetting behavior.
+    Creates parent directories if needed.
+    """
     geotiff_path = Path(geotiff_path)
     output_path = Path(output_path)
     south, north = sorted((float(lat_range[0]), float(lat_range[1])))
