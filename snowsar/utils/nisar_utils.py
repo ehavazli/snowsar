@@ -255,6 +255,40 @@ def _write_geotiff(
         dst_ds.write(arr2d, 1)
 
 
+def _raster_grid_matches(
+    path: Union[str, Path],
+    *,
+    crs,
+    transform,
+    shape: Tuple[int, int],
+    transform_atol: float = 1e-9,
+) -> bool:
+    """Return True when an existing raster already matches the requested grid."""
+    try:
+        import rasterio
+    except ImportError as e:
+        raise ImportError("rasterio is required for GeoTIFF inspection.") from e
+
+    try:
+        with rasterio.open(path) as ds:
+            same_shape = (ds.height, ds.width) == tuple(shape)
+            same_crs = ds.crs == crs
+            same_transform = np.allclose(
+                tuple(ds.transform),
+                tuple(transform),
+                rtol=0.0,
+                atol=transform_atol,
+            )
+    except Exception as e:
+        logger.info(
+            "Existing raster could not be inspected; rewriting -> %s (%s)",
+            path,
+            e,
+        )
+        return False
+    return bool(same_shape and same_crs and same_transform)
+
+
 def _warp_to_template(
     src_arr: np.ndarray,
     *,
@@ -626,9 +660,20 @@ def _format_outname(
     >>> _format_outname("GUNW_20210101T000000_20210113T000000_T123_F456.h5", "unwrappedPhase")
     '20210101_20210113_unwrappedPhase_T123_F456.tif'
     """
-    ref_date, sec_date, track, frame = _gunw_date_tokens_from_filename(
-        gunw_h5
-    )
+    try:
+        ref_date, sec_date, track, frame = _gunw_date_tokens_from_filename(
+            gunw_h5
+        )
+    except ValueError:
+        dates = nisar_dates_from_gunw_h5(gunw_h5)
+        if len(dates) < 2:
+            raise ValueError(
+                f"Could not determine reference/secondary dates for {gunw_h5}"
+            )
+        ref_date = dates[0].strftime("%Y%m%d")
+        sec_date = dates[1].strftime("%Y%m%d")
+        track = "NA"
+        frame = "NA"
     return f"{ref_date}_{sec_date}_{layer_name}_T{track}_F{frame}.tif"
 
 
@@ -1169,25 +1214,22 @@ def extract_gunw_layers_to_geotiff_batch(
                 )
                 dem_dir_path.mkdir(parents=True, exist_ok=True)
 
-                gdf = nisar_footprint_from_gunw_h5(
+                dem_cache_path = dem_cache_path_for_gunw(
                     gunw_h5_path,
+                    out_dir=out_dir,
                     raster_path=gunw_unwrapped_phase_path(
                         frequency=frequency, pol=pol
                     ),
                     frequency=frequency,
                     pol=pol,
-                    crs_out="EPSG:4326",
-                )
-                minx, miny, maxx, maxy = gdf.total_bounds
-                key = (
-                    round(float(minx), dem_precision),
-                    round(float(miny), dem_precision),
-                    round(float(maxx), dem_precision),
-                    round(float(maxy), dem_precision),
+                    precision=dem_precision,
+                    data_source="COP",
+                    keep_egm=False,
                 )
                 dem_out = (
-                    dem_dir_path
-                    / f"dem_{key[0]}_{key[1]}_{key[2]}_{key[3]}.tif"
+                    dem_dir_path / dem_cache_path.name
+                    if dem_dir
+                    else dem_cache_path
                 )
 
                 if overwrite or (not dem_out.exists()):
@@ -1207,25 +1249,40 @@ def extract_gunw_layers_to_geotiff_batch(
 
                 # Warp DEM to match output grid and write
                 dem_copy = out_dir / f"{gunw_h5_path.stem}_DEM.tif"
-                if overwrite or (not dem_copy.exists()):
+
+                # Determine output grid (warped or native)
+                if warp:
+                    # Use warped template grid
+                    out_crs = dst_crs
+                    out_transform = dst_transform
+                    out_shape = (dst_height, dst_width)
+                else:
+                    # Use native GUNW geogrid
+                    out_crs = src_crs_v
+                    out_transform = src_transform_v
+                    out_shape = arr_valid_native.shape
+
+                write_dem = overwrite or (not dem_copy.exists())
+                if dem_copy.exists() and not overwrite:
+                    write_dem = not _raster_grid_matches(
+                        dem_copy,
+                        crs=out_crs,
+                        transform=out_transform,
+                        shape=out_shape,
+                    )
+                    if write_dem:
+                        logger.info(
+                            "Existing DEM grid does not match requested output grid; rewriting -> %s",
+                            dem_copy,
+                        )
+
+                if write_dem:
                     # Read raw DEM
                     with rasterio.open(dem_out) as dem_src:
                         dem_raw = dem_src.read(1)
                         dem_src_transform = dem_src.transform
                         dem_src_crs = dem_src.crs
                         dem_nodata = dem_src.nodata
-
-                    # Determine output grid (warped or native)
-                    if warp:
-                        # Use warped template grid
-                        out_crs = dst_crs
-                        out_transform = dst_transform
-                        out_shape = (dst_height, dst_width)
-                    else:
-                        # Use native GUNW geogrid
-                        out_crs = src_crs_v
-                        out_transform = src_transform_v
-                        out_shape = arr_valid_native.shape
 
                     # Warp DEM to output grid
                     dem_warped = _warp_to_template(
@@ -1279,7 +1336,30 @@ def extract_gunw_layers_to_geotiff_batch(
 
                 out_name = _format_outname(gunw_h5_path, info.name)
                 out_path = out_dir / out_name
+                if warp:
+                    expected_crs = dst_crs
+                    expected_transform = dst_transform
+                    expected_shape = (dst_height, dst_width)
+                else:
+                    expected_crs = src_crs
+                    expected_transform = src_transform
+                    expected_shape = arr.shape
+
+                write_output = overwrite or (not out_path.exists())
                 if out_path.exists() and not overwrite:
+                    write_output = not _raster_grid_matches(
+                        out_path,
+                        crs=expected_crs,
+                        transform=expected_transform,
+                        shape=expected_shape,
+                    )
+                    if write_output:
+                        logger.info(
+                            "Existing %s grid does not match requested output grid; rewriting -> %s",
+                            info.name,
+                            out_path,
+                        )
+                if not write_output:
                     per_file[info.name] = out_path
                     continue
 
@@ -1348,10 +1428,48 @@ def extract_gunw_layers_to_geotiff_batch(
                 inc_label = "incidenceAngle_interp"
                 inc_out = out_dir / _format_outname(gunw_h5_path, inc_label)
 
-                have_loc = loc_out.exists() and not overwrite
-                have_inc = inc_out.exists() and not overwrite
+                if warp:
+                    expected_crs = dst_crs
+                    expected_transform = dst_transform
+                    expected_shape = (dst_height, dst_width)
+                else:
+                    expected_crs = src_crs_v
+                    expected_transform = src_transform_v
+                    expected_shape = arr_valid_native.shape
 
-                if (not have_loc) or (want_inc_interp and not have_inc):
+                write_loc = overwrite or (not loc_out.exists())
+                if loc_out.exists() and not overwrite:
+                    write_loc = not _raster_grid_matches(
+                        loc_out,
+                        crs=expected_crs,
+                        transform=expected_transform,
+                        shape=expected_shape,
+                    )
+                    if write_loc:
+                        logger.info(
+                            "Existing %s grid does not match requested output grid; rewriting -> %s",
+                            loc_label,
+                            loc_out,
+                        )
+
+                write_inc = False
+                if want_inc_interp:
+                    write_inc = overwrite or (not inc_out.exists())
+                    if inc_out.exists() and not overwrite:
+                        write_inc = not _raster_grid_matches(
+                            inc_out,
+                            crs=expected_crs,
+                            transform=expected_transform,
+                            shape=expected_shape,
+                        )
+                        if write_inc:
+                            logger.info(
+                                "Existing %s grid does not match requested output grid; rewriting -> %s",
+                                inc_label,
+                                inc_out,
+                            )
+
+                if write_loc or write_inc:
                     inc_arr, local_arr, src_t, src_c = (
                         interpolate_incidence_and_local_incidence(
                             gunw_h5_path,
@@ -1375,15 +1493,16 @@ def extract_gunw_layers_to_geotiff_batch(
                             dst_nodata=np.nan,
                         )
                         loc_w[~unw_valid] = np.nan
-                        _write_geotiff(
-                            loc_w.astype(np.float32),
-                            loc_out,
-                            crs=dst_crs,
-                            transform=dst_transform,
-                            nodata=np.nan,
-                        )
+                        if write_loc:
+                            _write_geotiff(
+                                loc_w.astype(np.float32),
+                                loc_out,
+                                crs=dst_crs,
+                                transform=dst_transform,
+                                nodata=np.nan,
+                            )
 
-                        if want_inc_interp:
+                        if write_inc:
                             inc_w = _warp_to_template(
                                 inc_arr,
                                 src_transform=src_t,
@@ -1406,15 +1525,16 @@ def extract_gunw_layers_to_geotiff_batch(
                     else:
                         local_arr = local_arr.astype(np.float32, copy=False)
                         local_arr[~unw_valid] = np.nan
-                        _write_geotiff(
-                            local_arr,
-                            loc_out,
-                            crs=src_c,
-                            transform=src_t,
-                            nodata=np.nan,
-                        )
+                        if write_loc:
+                            _write_geotiff(
+                                local_arr,
+                                loc_out,
+                                crs=src_c,
+                                transform=src_t,
+                                nodata=np.nan,
+                            )
 
-                        if want_inc_interp:
+                        if write_inc:
                             inc_arr = inc_arr.astype(np.float32, copy=False)
                             inc_arr[~unw_valid] = np.nan
                             _write_geotiff(
@@ -1446,7 +1566,30 @@ def extract_gunw_layers_to_geotiff_batch(
                         )
                     label = f"{nm}_interp"
                     out_path = out_dir / _format_outname(gunw_h5_path, label)
+                    if warp:
+                        expected_crs = dst_crs
+                        expected_transform = dst_transform
+                        expected_shape = (dst_height, dst_width)
+                    else:
+                        expected_crs = src_crs_v
+                        expected_transform = src_transform_v
+                        expected_shape = arr_valid_native.shape
+
+                    write_output = overwrite or (not out_path.exists())
                     if out_path.exists() and not overwrite:
+                        write_output = not _raster_grid_matches(
+                            out_path,
+                            crs=expected_crs,
+                            transform=expected_transform,
+                            shape=expected_shape,
+                        )
+                        if write_output:
+                            logger.info(
+                                "Existing %s grid does not match requested output grid; rewriting -> %s",
+                                label,
+                                out_path,
+                            )
+                    if not write_output:
                         per_file[label] = out_path
                         continue
 
@@ -1525,7 +1668,30 @@ def extract_gunw_layers_to_geotiff_batch(
 
                 label = f"{nm}_interp"
                 out_path = out_dir / _format_outname(gunw_h5_path, label)
+                if warp:
+                    expected_crs = dst_crs
+                    expected_transform = dst_transform
+                    expected_shape = (dst_height, dst_width)
+                else:
+                    expected_crs = src_crs_v
+                    expected_transform = src_transform_v
+                    expected_shape = arr_valid_native.shape
+
+                write_output = overwrite or (not out_path.exists())
                 if out_path.exists() and not overwrite:
+                    write_output = not _raster_grid_matches(
+                        out_path,
+                        crs=expected_crs,
+                        transform=expected_transform,
+                        shape=expected_shape,
+                    )
+                    if write_output:
+                        logger.info(
+                            "Existing %s grid does not match requested output grid; rewriting -> %s",
+                            label,
+                            out_path,
+                        )
+                if not write_output:
                     per_file[label] = out_path
                     continue
 
@@ -1763,9 +1929,9 @@ def _grid_bounds_from_xy(
     return (minx, miny, maxx, maxy), dx, dy
 
 
-def _read_raster_epsg(path: Union[str, Path]) -> int:
+def _read_raster_epsg(path: Union[str, Path]) -> Union[int, str]:
     """
-    Extract EPSG code from raster file using GDAL.
+    Extract raster spatial reference using GDAL.
 
     Parameters
     ----------
@@ -1774,8 +1940,8 @@ def _read_raster_epsg(path: Union[str, Path]) -> int:
 
     Returns
     -------
-    int
-        EPSG code from raster spatial reference
+    int or str
+        EPSG code when available, otherwise projection WKT.
 
     Raises
     ------
@@ -1784,12 +1950,7 @@ def _read_raster_epsg(path: Union[str, Path]) -> int:
     OSError
         If raster file cannot be opened
     ValueError
-        If raster projection lacks EPSG authority code
-
-    Notes
-    -----
-    Requires raster CRS to have explicit EPSG authority metadata.
-    Rasters with WKT-only or custom projections will fail.
+        If raster projection is empty.
     """
     try:
         from osgeo import gdal, osr
@@ -1800,20 +1961,26 @@ def _read_raster_epsg(path: Union[str, Path]) -> int:
     if ds is None:
         raise OSError(f"Cannot open raster: {path}")
 
-    srs = osr.SpatialReference(wkt=ds.GetProjection())
+    projection = ds.GetProjection()
+    if not projection:
+        raise ValueError(f"Raster has no projection: {path}")
+    srs = osr.SpatialReference(wkt=projection)
     epsg = srs.GetAttrValue("AUTHORITY", 1)
     if epsg is None:
-        raise ValueError(
-            f"Could not determine EPSG from raster projection: {path}"
-        )
+        return projection
     return int(epsg)
+
+
+def _format_gdal_srs(srs: Union[int, str]) -> str:
+    """Return a GDAL SRS string from EPSG integer or WKT/proj string."""
+    return f"EPSG:{int(srs)}" if isinstance(srs, (int, np.integer)) else str(srs)
 
 
 def _warp_to_grid_mem(
     *,
     src_path: Union[str, Path],
-    src_epsg: int,
-    dst_epsg: int,
+    src_epsg: Union[int, str],
+    dst_epsg: Union[int, str],
     xcoord: np.ndarray,
     ycoord: np.ndarray,
     resample_alg: str,
@@ -1828,10 +1995,10 @@ def _warp_to_grid_mem(
     ----------
     src_path : str or Path
         Path to source raster file
-    src_epsg : int
-        Source EPSG code
-    dst_epsg : int
-        Destination EPSG code
+    src_epsg : int or str
+        Source EPSG code or WKT/proj string
+    dst_epsg : int or str
+        Destination EPSG code or WKT/proj string
     xcoord : np.ndarray
         Target X coordinates (pixel centers), 1D array
     ycoord : np.ndarray
@@ -1860,16 +2027,15 @@ def _warp_to_grid_mem(
     except Exception as e:
         raise ImportError("GDAL (osgeo) is required for DEM warping.") from e
 
-    bounds, dx, dy = _grid_bounds_from_xy(xcoord, ycoord)
+    bounds, _, _ = _grid_bounds_from_xy(xcoord, ycoord)
 
     warp_opts = gdal.WarpOptions(
         format="MEM",
         outputBounds=bounds,
-        srcSRS=f"EPSG:{int(src_epsg)}",
-        dstSRS=f"EPSG:{int(dst_epsg)}",
-        xRes=abs(dx),
-        yRes=abs(dy),
-        targetAlignedPixels=True,
+        srcSRS=_format_gdal_srs(src_epsg),
+        dstSRS=_format_gdal_srs(dst_epsg),
+        width=int(xcoord.size),
+        height=int(ycoord.size),
         resampleAlg=str(resample_alg),
     )
     dst = gdal.Warp("", str(src_path), options=warp_opts)
@@ -2022,7 +2188,7 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
     dem_resampling: str = "bilinear",
     overwrite: bool = False,
     dst_dtype: str = "float32",
-    dst_nodata: float = 0.0,
+    dst_nodata: float = np.nan,
 ) -> Path:
     """
     Interpolate a 3D NISAR L2 GUNW radarGrid metadata cube onto the GUNW geogrid using a DEM.
@@ -2088,7 +2254,6 @@ def interpolate_gunw_radargrid_cube_to_geotiff(
         ycoord=y_out,
         resample_alg=dem_resampling,
     ).astype(np.float32, copy=False)
-
     valid = _read_valid_unw_mask_full_geogrid(
         gunw_h5, frequency=frequency, pol=pol
     )
@@ -2205,7 +2370,7 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
     cube_interp_method: str = "linear",
     dem_resampling: str = "bilinear",
     overwrite: bool = False,
-    dst_nodata: float = 0.0,
+    dst_nodata: float = np.nan,
 ) -> Tuple[Path, Path]:
     """
     Produce BOTH interpolated incidenceAngle and local incidence angle using LOS unit vectors + DEM normal.
@@ -2293,6 +2458,14 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
         ycoord=y_out,
         resample_alg=dem_resampling,
     ).astype(np.float32, copy=False)
+    valid = _read_valid_unw_mask_full_geogrid(
+        gunw_h5, frequency=frequency, pol=pol
+    )
+    if valid.shape != dem_on_grid.shape:
+        raise ValueError(
+            "Validity mask shape does not match DEM-on-grid shape. "
+            f"mask={valid.shape}, dem={dem_on_grid.shape}."
+        )
 
     Y_2d, X_2d = np.meshgrid(y_out, x_out, indexing="ij")
     pts = np.column_stack(
@@ -2341,6 +2514,8 @@ def interpolate_incidence_and_local_incidence_to_geotiff(
     dot = le * n_e + ln * n_n + lu * n_u
     dot = np.clip(np.abs(dot), 0.0, 1.0)
     local_inc = np.degrees(np.arccos(dot)).astype(np.float32)
+    inc_out[~valid] = np.nan
+    local_inc[~valid] = np.nan
 
     inc_out = np.where(
         np.isfinite(inc_out), inc_out, float(dst_nodata)

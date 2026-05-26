@@ -5,7 +5,6 @@ from typing import Dict
 
 import geopandas as gpd
 import pandas as pd
-import ulmo
 from shapely.geometry import Point
 from shapely.ops import transform as shp_transform
 
@@ -70,6 +69,8 @@ def fetch_snotel_sites(wsdlurl: str) -> gpd.GeoDataFrame:
     >>> sites.crs
     CRS.from_epsg(4326)
     """
+    import ulmo
+
     sites = ulmo.cuahsi.wof.get_sites(wsdlurl)
     df = pd.DataFrame.from_dict(sites, orient="index")
 
@@ -161,12 +162,6 @@ def _reproject_geometry(geom, src_crs, dst_crs):
     if str(src_crs) == str(dst_crs):
         return geom
 
-    # geopandas/pyproj transformer
-    transformer = (
-        gpd.GeoSeries([Point(0, 0)], crs=src_crs).to_crs(dst_crs).crs
-    )  # ensures CRS parse
-    # Use pyproj directly via GeoSeries.transform pattern:
-    # We can do it more cleanly using pyproj.Transformer if available through geopandas:
     import pyproj  # dependency of geopandas
 
     tfm = pyproj.Transformer.from_crs(
@@ -240,6 +235,7 @@ def fetch_snotel_timeseries(
     reference_date: str = "12-01",
     obs_hour: int = 0,
     include_temperature: bool = True,
+    errors: str = "warn",
 ) -> Dict[str, pd.DataFrame]:
     """
     Fetch SNOTEL snow water equivalent and temperature time series for multiple sites.
@@ -269,6 +265,9 @@ def fetch_snotel_timeseries(
     include_temperature : bool, default True
         Whether to fetch and include temperature (TOBS_H) data. If False or
         if temperature data unavailable, temp_c column will contain NaN.
+    errors : {"warn", "raise"}, default "warn"
+        If "warn", log site-level fetch failures and continue. If "raise",
+        re-raise fetch failures for reproducible batch runs.
 
     Returns
     -------
@@ -286,14 +285,14 @@ def fetch_snotel_timeseries(
     ------
     ValueError
         If snotel_sites is missing required columns ('code', 'name', 'geometry')
-        or if obs_hour is not in range [0, 23]
+        or if obs_hour is not in range [0, 23], or if errors is invalid.
 
     Notes
     -----
     - Filters to quality_control_level_code == "1" when available
     - Converts SWE from inches to cm using 1 inch = 2.54 cm
     - Converts temperature from Fahrenheit to Celsius
-    - Logs warnings for sites with errors or missing data
+    - Logs warnings for sites with errors or missing data unless errors="raise"
     - Handles duplicate site names by appending " (code)" or " #N"
 
     Examples
@@ -317,6 +316,10 @@ def fetch_snotel_timeseries(
 
     if not (0 <= obs_hour <= 23):
         raise ValueError("obs_hour must be in [0, 23]")
+    if errors not in {"warn", "raise"}:
+        raise ValueError("errors must be either 'warn' or 'raise'")
+
+    import ulmo
 
     results: Dict[str, pd.DataFrame] = {}
 
@@ -372,8 +375,11 @@ def fetch_snotel_timeseries(
                 )
                 continue
 
-            swe_df["date_time_utc"] = pd.to_datetime(
-                swe_df["date_time_utc"], errors="coerce"
+            swe_df["date_time_utc"] = (
+                pd.to_datetime(
+                    swe_df["date_time_utc"], errors="coerce", utc=True
+                )
+                .dt.tz_convert(None)
             )
             swe_df = swe_df.dropna(subset=["date_time_utc"]).copy()
 
@@ -422,8 +428,13 @@ def fetch_snotel_timeseries(
                                 "date_time_utc" in tmp_df.columns
                                 and "value" in tmp_df.columns
                             ):
-                                tmp_df["date_time_utc"] = pd.to_datetime(
-                                    tmp_df["date_time_utc"], errors="coerce"
+                                tmp_df["date_time_utc"] = (
+                                    pd.to_datetime(
+                                        tmp_df["date_time_utc"],
+                                        errors="coerce",
+                                        utc=True,
+                                    )
+                                    .dt.tz_convert(None)
                                 )
                                 tmp_df = tmp_df.dropna(
                                     subset=["date_time_utc"]
@@ -443,6 +454,8 @@ def fetch_snotel_timeseries(
                                 ][["date_time_utc", "temp_c"]].copy()
 
                 except Exception as e_temp:
+                    if errors == "raise":
+                        raise
                     logger.warning(
                         "TOBS_H failed for %s (%s): %s",
                         site_code,
@@ -483,6 +496,8 @@ def fetch_snotel_timeseries(
             ].copy()
 
         except Exception as e:
+            if errors == "raise":
+                raise
             logger.warning(
                 "Skipping site %s (%s): %s", site_code, site_name, e
             )

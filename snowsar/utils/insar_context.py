@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import geopandas as gpd
 import pandas as pd
@@ -35,18 +35,20 @@ class InsarContext:
     """
     Standardized InSAR workflow context for downstream analysis.
 
-    Provides a unified interface for HyP3 and MintPy workflows, extracting
+    Provides a unified interface for HyP3, MintPy, and NISAR workflows, extracting
     acquisition dates and valid-data footprint from processed InSAR products.
 
     Attributes
     ----------
     source : str
-        Processing workflow: "hyp3" or "mintpy"
+        Processing workflow: "hyp3", "mintpy", or "nisar"
     dates : List[pd.Timestamp]
         Acquisition dates, normalized to midnight (00:00:00)
     footprint : gpd.GeoDataFrame
         Single-row GeoDataFrame with Polygon geometry representing valid data extent.
         CRS is EPSG:4326 (WGS84 lat/lon).
+    source_files : Tuple[str, ...]
+        Source files used to build the context.
 
     Notes
     -----
@@ -74,11 +76,12 @@ class InsarContext:
     CRS.from_epsg(4326)
     """
 
-    source: str  # "hyp3" or "mintpy"
+    source: str  # "hyp3", "mintpy", or "nisar"
     dates: List[pd.Timestamp]  # normalized (midnight) timestamps
     footprint: (
         gpd.GeoDataFrame
     )  # single-row GeoDataFrame with polygon geometry
+    source_files: Tuple[str, ...] = ()
 
 
 def build_insar_context(
@@ -87,17 +90,21 @@ def build_insar_context(
     hyp3_tifs: Optional[Sequence[Union[str, Path]]] = None,
     mintpy_timeseries_h5: Optional[Union[str, Path]] = None,
     mintpy_reference_slice: Optional[str] = None,
+    nisar_gunw_h5s: Optional[Sequence[Union[str, Path]]] = None,
+    nisar_frequency: str = "A",
+    nisar_pol: str = "HH",
 ) -> InsarContext:
     """
-    Build InSAR workflow context (dates, footprint) from HyP3 or MintPy products.
+    Build InSAR workflow context (dates, footprint) from HyP3, MintPy, or NISAR products.
 
     Factory function that routes to appropriate workflow-specific extractors based
-    on source parameter. Enforces mutual exclusivity between HyP3 and MintPy inputs.
+    on source parameter. Enforces mutual exclusivity between HyP3, MintPy, and
+    NISAR inputs.
 
     Parameters
     ----------
     source : str
-        Processing workflow: "hyp3" or "mintpy"
+        Processing workflow: "hyp3", "mintpy", or "nisar"
     hyp3_tifs : Sequence[str or Path], optional
         HyP3 GeoTIFF paths (e.g., *_unw_phase_clipped.tif).
         Required if source="hyp3", must be None if source="mintpy".
@@ -107,6 +114,12 @@ def build_insar_context(
     mintpy_reference_slice : str, optional
         Slice name to use for MintPy footprint generation.
         If None, uses first slice. Only used when source="mintpy".
+    nisar_gunw_h5s : Sequence[str or Path], optional
+        NISAR GUNW HDF5 files. Required if source="nisar".
+    nisar_frequency : str, default "A"
+        NISAR frequency for footprint extraction.
+    nisar_pol : str, default "HH"
+        NISAR polarization for footprint extraction.
 
     Returns
     -------
@@ -116,15 +129,16 @@ def build_insar_context(
     Raises
     ------
     ValueError
-        If source is not "hyp3" or "mintpy", or if both hyp3_tifs and
-        mintpy_timeseries_h5 are provided, or if required inputs are missing,
-        or if footprint extraction returns empty geometry
+        If source is not "hyp3", "mintpy", or "nisar"; if inputs for multiple
+        workflows are provided; if required inputs are missing; or if footprint
+        extraction returns empty geometry.
 
     Notes
     -----
-    HyP3 and MintPy are mutually exclusive workflows:
+    HyP3, MintPy, and NISAR are mutually exclusive workflows:
     - HyP3: dates extracted from filenames, footprint from raster masks
     - MintPy: dates extracted from HDF5 slices, footprint from one time slice
+    - NISAR: dates and footprint extracted from GUNW HDF5 products
 
     Examples
     --------
@@ -148,14 +162,19 @@ def build_insar_context(
     'mintpy'
     """
     source = source.lower().strip()
-    if source not in {"hyp3", "mintpy"}:
-        raise ValueError("source must be one of: 'hyp3', 'mintpy'")
+    if source not in {"hyp3", "mintpy", "nisar"}:
+        raise ValueError("source must be one of: 'hyp3', 'mintpy', 'nisar'")
 
     # Enforce mutual exclusivity
-    if hyp3_tifs is not None and mintpy_timeseries_h5 is not None:
+    provided = [
+        hyp3_tifs is not None,
+        mintpy_timeseries_h5 is not None,
+        nisar_gunw_h5s is not None,
+    ]
+    if sum(provided) > 1:
         raise ValueError(
-            "Do not provide both hyp3_tifs and mintpy_timeseries_h5. "
-            "HyP3 and MintPy are mutually exclusive workflows."
+            "Provide inputs for only one workflow: hyp3_tifs, "
+            "mintpy_timeseries_h5, or nisar_gunw_h5s."
         )
 
     if source == "hyp3":
@@ -184,7 +203,46 @@ def build_insar_context(
                 "HyP3 footprint_from_geotiffs() returned empty geometry."
             )
 
-        return InsarContext(source="hyp3", dates=dates, footprint=footprint)
+        return InsarContext(
+            source="hyp3",
+            dates=dates,
+            footprint=footprint,
+            source_files=tuple(str(Path(p)) for p in hyp3_tifs),
+        )
+
+    if source == "nisar":
+        if not nisar_gunw_h5s:
+            raise ValueError("source='nisar' requires nisar_gunw_h5s")
+
+        from .nisar_utils import nisar_dates_from_gunw_h5, nisar_union_footprints
+
+        dates = sorted(
+            {
+                date
+                for gunw_h5 in nisar_gunw_h5s
+                for date in nisar_dates_from_gunw_h5(gunw_h5)
+            }
+        )
+        if not dates:
+            raise ValueError("No valid dates parsed from NISAR GUNW files.")
+
+        footprint = nisar_union_footprints(
+            nisar_gunw_h5s,
+            frequency=nisar_frequency,
+            pol=nisar_pol,
+            crs_out="EPSG:4326",
+        )
+        if not _has_nonempty_geometry(footprint):
+            raise ValueError(
+                "NISAR nisar_union_footprints() returned empty geometry."
+            )
+
+        return InsarContext(
+            source="nisar",
+            dates=dates,
+            footprint=footprint,
+            source_files=tuple(str(Path(p)) for p in nisar_gunw_h5s),
+        )
 
     # source == "mintpy"
     if mintpy_timeseries_h5 is None:
@@ -205,4 +263,9 @@ def build_insar_context(
             "MintPy footprint_from_timeseries_h5() returned empty geometry."
         )
 
-    return InsarContext(source="mintpy", dates=dates, footprint=footprint)
+    return InsarContext(
+        source="mintpy",
+        dates=dates,
+        footprint=footprint,
+        source_files=(str(Path(mintpy_timeseries_h5)),),
+    )

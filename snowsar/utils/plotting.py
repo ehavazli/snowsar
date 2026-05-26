@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Union
 
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -159,7 +158,7 @@ def plot_snotel_data(
         axes[1].grid(True)
         plt.tight_layout()
         plt.show()
-        return
+        return fig, axes
 
     all_dates = np.array(
         pd.to_datetime(all_dates).normalize(), dtype="datetime64[D]"
@@ -191,6 +190,7 @@ def plot_snotel_data(
 
     plt.tight_layout()
     plt.show()
+    return fig, axes
 
 
 def make_footprint_station_map(
@@ -264,11 +264,12 @@ def make_footprint_station_map(
     >>> m.save("map.html")  # Save to file
     """
     try:
+        import geopandas as gpd
         import folium
     except ImportError as e:
         raise ImportError(
-            "folium is required for make_footprint_station_map. "
-            "Install with: pip install folium"
+            "geopandas and folium are required for make_footprint_station_map. "
+            "Install with: pip install geopandas folium"
         ) from e
 
     if footprint_gdf is None or footprint_gdf.empty:
@@ -288,8 +289,13 @@ def make_footprint_station_map(
     if not st.empty and st.crs is not None and str(st.crs) != "EPSG:4326":
         st = st.to_crs("EPSG:4326")
 
-    # Center on footprint centroid (use unary_union to be safe)
-    centroid = fp.geometry.unary_union.centroid
+    # Center on footprint centroid.
+    union_geom = (
+        fp.geometry.union_all()
+        if hasattr(fp.geometry, "union_all")
+        else fp.geometry.unary_union
+    )
+    centroid = union_geom.centroid
     m = folium.Map(
         location=[centroid.y, centroid.x], zoom_start=zoom_start, tiles=tiles
     )

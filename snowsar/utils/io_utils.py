@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pickle
+import tempfile
 from pathlib import Path
 from typing import Any, Union
 
@@ -30,8 +31,23 @@ def save_pickle(obj: Any, path: Union[str, Path]) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as f:
-        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_name = f.name
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+        Path(tmp_name).replace(path)
+    finally:
+        if tmp_name is not None:
+            tmp_path = Path(tmp_name)
+            if tmp_path.exists():
+                tmp_path.unlink()
 
 
 def load_pickle(path: Union[str, Path]) -> Any:

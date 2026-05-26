@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Sequence, Union
+from typing import TYPE_CHECKING, List, Sequence, Tuple, Union
 
-import geopandas as gpd
-import numpy as np
-import pandas as pd
-import rasterio
-from rasterio.features import shapes
-from shapely.geometry import Polygon, shape
-from shapely.ops import unary_union
+if TYPE_CHECKING:
+    import pandas as pd
 
 # Find any YYYYMMDD tokens (HyP3 names typically include 2 dates)
 _DATE_RE = re.compile(r"(\d{8})")
+
+
+def _parse_yyyymmdd(token: str):
+    """Return a normalized pandas timestamp for a YYYYMMDD token."""
+    try:
+        import pandas as pd
+    except Exception as e:
+        raise ImportError(
+            "pandas is required to parse HyP3 acquisition dates."
+        ) from e
+
+    return pd.to_datetime(token, format="%Y%m%d").normalize()
 
 
 def parse_unique_dates_from_hyp3_filenames(
@@ -58,11 +65,36 @@ def parse_unique_dates_from_hyp3_filenames(
         name = Path(p).name
         for token in _DATE_RE.findall(name):
             try:
-                dates.add(pd.to_datetime(token, format="%Y%m%d").normalize())
+                dates.add(_parse_yyyymmdd(token))
             except (ValueError, OverflowError):
                 # Skip invalid date tokens (e.g., "99999999" or malformed dates)
                 continue
     return sorted(dates)
+
+
+def parse_date_pairs_from_hyp3_filenames(
+    paths: Sequence[Union[str, Path]],
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    """
+    Parse sorted unique reference/secondary date pairs from HyP3 filenames.
+
+    The first two valid YYYYMMDD tokens in each filename are treated as the
+    interferogram pair. Filenames without at least two valid date tokens are
+    skipped.
+    """
+    pairs = set()
+    for p in paths:
+        parsed = []
+        for token in _DATE_RE.findall(Path(p).name):
+            try:
+                parsed.append(_parse_yyyymmdd(token))
+            except (ValueError, OverflowError):
+                continue
+            if len(parsed) == 2:
+                break
+        if len(parsed) == 2:
+            pairs.add(tuple(parsed))
+    return sorted(pairs)
 
 
 def footprint_from_geotiffs(
@@ -119,6 +151,17 @@ def footprint_from_geotiffs(
     >>> footprint.crs
     CRS.from_epsg(4326)
     """
+    try:
+        import geopandas as gpd
+        import rasterio
+        from rasterio.features import shapes
+        from shapely.geometry import Polygon, shape
+        from shapely.ops import unary_union
+    except Exception as e:
+        raise ImportError(
+            "geopandas, rasterio, and shapely are required to build HyP3 footprints."
+        ) from e
+
     if band < 1:
         raise ValueError(f"band must be >= 1, got {band}")
     tif_paths = [Path(p) for p in tif_paths]

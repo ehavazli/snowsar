@@ -17,6 +17,7 @@ _LAZY_IMPORTS = {
     "build_insar_context": ("insar_context", "build_insar_context"),
     # HyP3
     "parse_unique_dates_from_hyp3_filenames": ("hyp3_utils", "parse_unique_dates_from_hyp3_filenames"),
+    "parse_date_pairs_from_hyp3_filenames": ("hyp3_utils", "parse_date_pairs_from_hyp3_filenames"),
     "footprint_from_geotiffs": ("hyp3_utils", "footprint_from_geotiffs"),
     # MintPy
     "mintpy_dates_from_timeseries_h5": ("mintpy_utils", "mintpy_dates_from_timeseries_h5"),
@@ -78,3 +79,8 @@ def __getattr__(name):
         globals()[name] = attr
         return attr
     raise AttributeError(f"module 'snowsar.utils' has no attribute '{name}'")
+
+
+def __dir__():
+    """Expose lazy exports to interactive autocomplete."""
+    return sorted(set(globals()) | set(__all__))

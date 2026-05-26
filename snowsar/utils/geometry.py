@@ -19,7 +19,7 @@ def get_valid_data_polygon_from_array(
     *,
     crs: str = "EPSG:4326",
     hole_area_min: float = 0.0,
-    return_largest: bool = True,
+    return_largest: bool = False,
 ) -> gpd.GeoDataFrame:
     """
     Extract valid-data polygon(s) from a 2D array with NaNs.
@@ -52,7 +52,7 @@ def get_valid_data_polygon_from_array(
         Minimum area threshold for keeping holes in polygons.
         Holes smaller than this are filled. Units are in CRS native units squared
         (e.g., square degrees for EPSG:4326, square meters for projected CRS).
-    return_largest : bool, default True
+    return_largest : bool, default False
         If True and multiple disconnected polygons exist, return only
         the largest one. **WARNING:** This silently drops smaller disconnected
         valid-data regions. Set to False to preserve all regions as MultiPolygon.

@@ -538,10 +538,10 @@ def build_lidar_timeseries_h5(
     output_path: str | Path,
 ) -> Path:
     """Create a MintPy-like HDF5 timeseries from resampled LIDAR GeoTIFFs."""
-    from mintpy.utils import utils as ut
+    from mintpy.utils import readfile, writefile
 
     dates, stack, _ = read_geotiff_stack_sorted_by_date(resampled_pattern)
-    metadata = ut.readfile.read_attribute(str(mintpy_timeseries_path))
+    metadata = readfile.read_attribute(str(mintpy_timeseries_path))
     for key in ("REF_DATE", "REF_LAT", "REF_LON", "REF_X", "REF_Y"):
         metadata.pop(key, None)
 
@@ -552,7 +552,8 @@ def build_lidar_timeseries_h5(
         "timeseries": [np.float32, stack.shape, stack.astype(np.float32, copy=False)],
     }
     output_path = Path(output_path)
-    ut.writefile.layout_hdf5(str(output_path), ds_name_dict, metadata=metadata)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writefile.layout_hdf5(str(output_path), ds_name_dict, metadata=metadata)
     return output_path
 
 
