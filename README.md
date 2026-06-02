@@ -6,7 +6,7 @@
 
 ## Snow Environment Setup
 
-This repository requires a Conda environment with specific geospatial libraries and additional packages for accessing SNOTEL data.
+This repository is easiest to use from the provided Conda environment because several workflows rely on geospatial libraries that are more reliable from conda-forge than from a bare `pip` install.
 
 ### Create a New Environment
 
@@ -16,21 +16,20 @@ To create a new Conda environment named `snowsar` and install the required packa
 git clone git@github.com:ehavazli/snowsar.git;
 conda env create -f environment.yml;
 conda activate snowsar;
-pip install -e .
 ```
 
 Alternatively, to create it manually:
 
 ```bash
 git clone git@github.com:ehavazli/snowsar.git
-conda create -n snowsar rasterio sardem shapely geopandas contextily leafmap mintpy libgdal-hdf5 pip
+conda create -n snowsar rasterio sardem shapely geopandas contextily leafmap mintpy libgdal-hdf5 h5py earthaccess scipy pip
 conda activate snowsar
 ```
 
-After activating the environment, install the additional Python packages needed for SNOTEL data access:
+After activating the environment, install the package into that environment:
 
 ```bash
-pip install ulmo "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
+pip install -e .
 ```
 
 ### If the Environment Already Exists
@@ -38,8 +37,8 @@ pip install ulmo "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel
 If you already have the `snowsar` environment, you can install missing packages manually:
 
 ```bash
-conda install rasterio sardem shapely geopandas contextily leafmap libgdal-hdf5
-pip install ulmo "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
+conda install -c conda-forge rasterio sardem shapely geopandas contextily leafmap libgdal-hdf5 h5py earthaccess scipy
+pip install -e .
 ```
 
 ---

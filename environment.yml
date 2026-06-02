@@ -17,6 +17,10 @@ dependencies:
   - mintpy
   - h5py
   - libgdal-hdf5
+  - scipy
+
+  # Cloud streaming for NISAR data
+  - earthaccess
 
   # Mapping / notebooks
   - contextily
@@ -25,9 +29,10 @@ dependencies:
   - matplotlib
   - jupyterlab
   - nb_conda_kernels
+  - pytest
 
   - pip
   - pip:
       - ulmo
       - "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
-      - -e .
+      - asf-search  # NISAR data search and streaming

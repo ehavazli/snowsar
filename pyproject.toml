@@ -10,6 +10,24 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Emre Havazli" }]
+dependencies = [
+    "asf-search",
+    "earthaccess",
+    "folium",
+    "geopandas",
+    "h5py",
+    "matplotlib",
+    "mintpy",
+    "numpy",
+    "pandas",
+    "rasterio",
+    "pytest",
+    "sardem",
+    "scipy",
+    "shapely",
+    "ulmo",
+    "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
