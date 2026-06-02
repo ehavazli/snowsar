@@ -66,16 +66,19 @@ results = search_nisar_data(
     processing_level="GUNW"
 )
 
-# Stream data without downloading
-with open_nisar_h5_stream(results[0]) as f:
-    unwrapped = f['science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/HH/unwrappedPhase'][()]
+if not results:
+    print("No granules found for the given search parameters")
+else:
+    # Stream data without downloading
+    with open_nisar_h5_stream(results[0]) as f:
+        unwrapped = f['science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/HH/unwrappedPhase'][()]
 
-# Cache the same granule locally when you plan to reuse it
-local_h5 = cache_nisar_granule(results[0])
+    # Cache the same granule locally when you plan to reuse it
+    local_h5 = cache_nisar_granule(results[0])
 
-# Re-open the cached file locally without going back through Earthdata
-with open_nisar_h5_stream(local_h5) as f:
-    print(f["science"].keys())
+    # Re-open the cached file locally without going back through Earthdata
+    with open_nisar_h5_stream(local_h5) as f:
+        print(f["science"].keys())
 ```
 
 See [STREAMING.md](STREAMING.md) for complete documentation.

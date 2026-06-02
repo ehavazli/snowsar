@@ -277,6 +277,29 @@ def cache_nisar_granule(
             f"Unknown provider: {provider}. Choose 'earthaccess' or 'asf_search'."
         )
 
+    # Handle local .h5 files that are already on disk
+    if isinstance(granule, (str, Path)):
+        source_path = Path(granule)
+        if source_path.exists() and source_path.suffix == ".h5":
+            target_path = get_nisar_cache_path(granule, cache_dir=cache_dir)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # If source and target are the same, just return it
+            if source_path.resolve() == target_path.resolve():
+                logger.info("Reusing cached NISAR granule -> %s", target_path)
+                return target_path
+
+            # If target exists and overwrite is False, reuse it
+            if target_path.exists() and not overwrite:
+                logger.info("Reusing cached NISAR granule -> %s", target_path)
+                return target_path
+
+            # Copy or move the local file into cache
+            import shutil
+            shutil.copy2(source_path, target_path)
+            logger.info("Cached local NISAR granule -> %s", target_path)
+            return target_path
+
     target_path = get_nisar_cache_path(granule, cache_dir=cache_dir)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     if target_path.exists() and not overwrite:
@@ -451,9 +474,12 @@ def download_with_progress(
         session = asf.ASFSession()
         downloaded: list[Path] = []
         for result in granule_results:
-            result.download(path=str(output_dir), session=session)
             filename = _granule_basename(result)
-            downloaded.append(output_dir / filename)
+            target_file = output_dir / filename
+            if target_file.exists() and not overwrite:
+                continue
+            result.download(path=str(output_dir), session=session)
+            downloaded.append(target_file)
         return downloaded
 
     raise ValueError(
