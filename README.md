@@ -2,6 +2,14 @@
 
 **snowsar** is a software package for estimating Snow Water Equivalent (SWE) from InSAR time series data, supporting the characterization of seasonal snowpack dynamics and cryospheric processes.
 
+## Features
+
+- **NISAR Data Support**: Process NISAR GUNW Level-2 interferograms
+- **Cloud Streaming**: Stream NISAR data directly from NASA Earthdata Cloud without downloading (see [STREAMING.md](STREAMING.md))
+- **HyP3 Integration**: Work with ASF HyP3 processed Sentinel-1 InSAR products
+- **MintPy Compatible**: Leverage MintPy time series analysis capabilities
+- **SNOTEL Integration**: Access in-situ snow measurements for validation
+
 ---
 
 ## Snow Environment Setup
@@ -32,6 +40,45 @@ After activating the environment, install the additional Python packages needed 
 ```bash
 pip install ulmo "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl"
 ```
+
+## Cloud Streaming for NISAR Data
+
+This package supports **streaming NISAR data directly from NASA Earthdata Cloud** without downloading entire files. This is ideal for:
+
+- Quick exploration of NISAR products
+- Extracting specific layers (unwrapped phase, coherence, etc.)
+- Cloud-native processing workflows
+- Storage-constrained environments
+
+**Quick start:**
+
+```python
+from snowsar.utils import (
+    cache_nisar_granule,
+    open_nisar_h5_stream,
+    search_nisar_data,
+)
+
+# Search for NISAR data
+results = search_nisar_data(
+    bbox=(-120, 37, -119, 38),
+    start_date="2026-01-01",
+    processing_level="GUNW"
+)
+
+# Stream data without downloading
+with open_nisar_h5_stream(results[0]) as f:
+    unwrapped = f['science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/HH/unwrappedPhase'][()]
+
+# Cache the same granule locally when you plan to reuse it
+local_h5 = cache_nisar_granule(results[0])
+
+# Re-open the cached file locally without going back through Earthdata
+with open_nisar_h5_stream(local_h5) as f:
+    print(f["science"].keys())
+```
+
+See [STREAMING.md](STREAMING.md) for complete documentation.
 
 ### If the Environment Already Exists
 
