@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: snowsar
+          auto-activate-base: false
+          environment-file: environment.yml
+          use-mamba: true
+
+      - name: Install package
+        shell: bash -el {0}
+        run: pip install -e .
+
+      - name: Run tests
+        shell: bash -el {0}
+        run: pytest -q
