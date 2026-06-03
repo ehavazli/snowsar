@@ -169,6 +169,77 @@ def test_cache_nisar_granule_reuses_existing_file(monkeypatch, tmp_path):
     assert download_calls == []
 
 
+def test_cache_nisar_granule_reuses_existing_file_url(tmp_path):
+    """file:// URLs to local HDF5 files should use the local cache fast path."""
+    from snowsar.utils.stream_utils import cache_nisar_granule, get_nisar_cache_path
+
+    local_h5 = _write_local_h5(tmp_path / "source_file_url.h5")
+    granule = local_h5.as_uri()
+
+    cache_path = get_nisar_cache_path(granule, cache_dir=tmp_path / "cache")
+    resolved = cache_nisar_granule(granule, cache_dir=tmp_path / "cache")
+
+    assert cache_path == tmp_path / "cache" / local_h5.name
+    assert resolved == cache_path
+    assert resolved.read_bytes() == local_h5.read_bytes()
+
+
+def test_cache_nisar_granule_reuses_existing_tilde_path(monkeypatch, tmp_path):
+    """~/ paths should be expanded before deciding whether to reuse a local file."""
+    from snowsar.utils.stream_utils import cache_nisar_granule, get_nisar_cache_path
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    local_h5 = _write_local_h5(fake_home / "tilde_source.h5")
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    granule = f"~/{local_h5.name}"
+    cache_path = get_nisar_cache_path(granule, cache_dir=tmp_path / "cache")
+    resolved = cache_nisar_granule(granule, cache_dir=tmp_path / "cache")
+
+    assert cache_path == tmp_path / "cache" / local_h5.name
+    assert resolved == cache_path
+    assert resolved.read_bytes() == local_h5.read_bytes()
+
+
+def test_cache_nisar_granule_missing_local_path_falls_back_to_download(
+    monkeypatch, tmp_path
+):
+    """Missing local-looking paths should continue through the download flow."""
+    from snowsar.utils import stream_utils
+
+    granule = f"~/{tmp_path.name}_missing.h5"
+    expected_cache_path = stream_utils.get_nisar_cache_path(
+        granule, cache_dir=tmp_path / "cache"
+    )
+    download_calls = []
+
+    def fake_download(granule_results, *, output_dir, provider, overwrite):
+        download_calls.append(
+            {
+                "granule_results": granule_results,
+                "output_dir": output_dir,
+                "provider": provider,
+                "overwrite": overwrite,
+            }
+        )
+        return [expected_cache_path]
+
+    monkeypatch.setattr(stream_utils, "download_with_progress", fake_download)
+
+    resolved = stream_utils.cache_nisar_granule(granule, cache_dir=tmp_path / "cache")
+
+    assert resolved == expected_cache_path
+    assert download_calls == [
+        {
+            "granule_results": [granule],
+            "output_dir": expected_cache_path.parent,
+            "provider": "earthaccess",
+            "overwrite": False,
+        }
+    ]
+
+
 def test_download_with_progress_normalizes_earthaccess_inputs(monkeypatch, tmp_path):
     """Downloads should preserve DataGranule objects and normalize ASF results to URLs."""
     from snowsar.utils.stream_utils import download_with_progress

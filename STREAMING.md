@@ -50,13 +50,16 @@ results = search_nisar_data(
     max_results=1,
 )
 
-with open_nisar_h5_stream(results[0]) as f:
-    unwrapped = f[
-        "science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/HH/unwrappedPhase"
-    ][()]
+if not results:
+    print("No NISAR granules found for the requested search.")
+else:
+    with open_nisar_h5_stream(results[0]) as f:
+        unwrapped = f[
+            "science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/HH/unwrappedPhase"
+        ][()]
 
-local_h5 = cache_nisar_granule(results[0])
-print(local_h5)
+    local_h5 = cache_nisar_granule(results[0])
+    print(local_h5)
 ```
 
 ## When To Stream Vs Cache
@@ -136,15 +139,21 @@ location and reuses the local file on later calls.
 ```python
 from snowsar.utils import cache_nisar_granule, get_nisar_cache_path
 
-cache_path = get_nisar_cache_path(results[0])
-local_h5 = cache_nisar_granule(results[0])
-assert local_h5 == cache_path
+if not results:
+    print("No NISAR granules found for the requested search.")
+else:
+    cache_path = get_nisar_cache_path(results[0])
+    local_h5 = cache_nisar_granule(results[0])
+    assert local_h5 == cache_path
 ```
 
 You can also choose a project-local cache:
 
 ```python
-local_h5 = cache_nisar_granule(results[0], cache_dir="./data/nisar_cache")
+if not results:
+    print("No NISAR granules found for the requested search.")
+else:
+    local_h5 = cache_nisar_granule(results[0], cache_dir="./data/nisar_cache")
 ```
 
 ## Batch Processing

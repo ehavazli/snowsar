@@ -278,27 +278,27 @@ def cache_nisar_granule(
         )
 
     # Handle local .h5 files that are already on disk
-    if isinstance(granule, (str, Path)):
-        source_path = Path(granule)
-        if source_path.exists() and source_path.suffix == ".h5":
-            target_path = get_nisar_cache_path(granule, cache_dir=cache_dir)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path = _local_path_from_granule(granule)
+    if source_path is not None and source_path.exists() and source_path.suffix == ".h5":
+        target_path = get_nisar_cache_path(granule, cache_dir=cache_dir)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # If source and target are the same, just return it
-            if source_path.resolve() == target_path.resolve():
-                logger.info("Reusing cached NISAR granule -> %s", target_path)
-                return target_path
-
-            # If target exists and overwrite is False, reuse it
-            if target_path.exists() and not overwrite:
-                logger.info("Reusing cached NISAR granule -> %s", target_path)
-                return target_path
-
-            # Copy or move the local file into cache
-            import shutil
-            shutil.copy2(source_path, target_path)
-            logger.info("Cached local NISAR granule -> %s", target_path)
+        # If source and target are the same, just return it
+        if source_path.resolve() == target_path.resolve():
+            logger.info("Reusing cached NISAR granule -> %s", target_path)
             return target_path
+
+        # If target exists and overwrite is False, reuse it
+        if target_path.exists() and not overwrite:
+            logger.info("Reusing cached NISAR granule -> %s", target_path)
+            return target_path
+
+        # Copy or move the local file into cache
+        import shutil
+
+        shutil.copy2(source_path, target_path)
+        logger.info("Cached local NISAR granule -> %s", target_path)
+        return target_path
 
     target_path = get_nisar_cache_path(granule, cache_dir=cache_dir)
     target_path.parent.mkdir(parents=True, exist_ok=True)
