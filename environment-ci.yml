@@ -1,0 +1,11 @@
+name: snowsar-ci
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.*
+  - pip
+  - numpy
+  - pandas
+  - h5py
+  - scipy
+  - pytest

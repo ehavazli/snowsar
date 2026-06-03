@@ -9,12 +9,40 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import h5py
 import numpy as np
-import rasterio
-from rasterio.crs import CRS
-from rasterio.enums import Resampling
-from rasterio.windows import Window, from_bounds
-from rasterio.transform import Affine
-from rasterio.warp import reproject
+
+
+class _MissingOptionalDependency:
+    def __init__(self, package: str):
+        self.package = package
+
+    def __getattr__(self, name: str) -> Any:
+        raise ImportError(f"{self.package} is required for this functionality.")
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise ImportError(f"{self.package} is required for this functionality.")
+
+
+try:
+    import rasterio
+    from rasterio.crs import CRS
+    from rasterio.enums import Resampling
+    from rasterio.transform import Affine
+    from rasterio.warp import reproject
+    from rasterio.windows import Window, from_bounds
+except ImportError:
+    rasterio = _MissingOptionalDependency("rasterio")
+    CRS = _MissingOptionalDependency("rasterio")
+
+    class _MissingResampling:
+        bilinear = "bilinear"
+        average = "average"
+        nearest = "nearest"
+
+    Resampling = _MissingResampling
+    Window = _MissingOptionalDependency("rasterio")
+    Affine = _MissingOptionalDependency("rasterio")
+    from_bounds = _MissingOptionalDependency("rasterio")
+    reproject = _MissingOptionalDependency("rasterio")
 
 
 _DATE_PATTERN = re.compile(r"(?P<year>\d{4})(?P<month>[A-Za-z]{3})(?P<day>\d{1,2})(?:-(?P<end_day>\d{1,2}))?")
