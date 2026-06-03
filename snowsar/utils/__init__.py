@@ -61,6 +61,13 @@ _LAZY_IMPORTS = {
     "nisar_union_footprints": ("nisar_utils", "nisar_union_footprints"),
     "extract_gunw_layers_to_geotiff_batch": ("nisar_utils", "extract_gunw_layers_to_geotiff_batch"),
     "download_dem_for_gunw_with_sardem": ("nisar_utils", "download_dem_for_gunw_with_sardem"),
+    # Streaming / cache
+    "setup_earthaccess_auth": ("stream_utils", "setup_earthaccess_auth"),
+    "open_nisar_h5_stream": ("stream_utils", "open_nisar_h5_stream"),
+    "search_nisar_data": ("stream_utils", "search_nisar_data"),
+    "download_with_progress": ("stream_utils", "download_with_progress"),
+    "cache_nisar_granule": ("stream_utils", "cache_nisar_granule"),
+    "get_nisar_cache_path": ("stream_utils", "get_nisar_cache_path"),
 }
 
 __all__ = list(_LAZY_IMPORTS.keys())
