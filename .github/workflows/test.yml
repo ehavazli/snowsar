@@ -20,5 +20,8 @@ jobs:
           environment-file: environment-ci.yml
           use-mamba: true
 
+      - name: Install package
+        run: conda run -n snowsar-ci python -m pip install --no-deps .
+
       - name: Run tests
         run: conda run -n snowsar-ci pytest -q
