@@ -4,9 +4,6 @@ import h5py
 import numpy as np
 import pytest
 
-pytest.importorskip("geopandas")
-pytest.importorskip("rasterio")
-
 from snowsar.utils.lidar_utils import (
     compute_pearson_correlation,
     cumulative_sum_through_date,

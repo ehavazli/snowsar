@@ -12,14 +12,41 @@ if TYPE_CHECKING:
     from rasterio import Affine
     from rasterio.crs import CRS as RasterCRS
 
-import geopandas as gpd
 import h5py
 import numpy as np
 import pandas as pd
-from rasterio.features import shapes
-from rasterio.transform import from_origin
-from shapely.geometry import Polygon, shape
-from shapely.ops import unary_union
+
+
+class _MissingOptionalDependency:
+    def __init__(self, package: str):
+        self.package = package
+
+    def __getattr__(self, name: str):
+        raise ImportError(f"{self.package} is required for this functionality.")
+
+    def __call__(self, *args, **kwargs):
+        raise ImportError(f"{self.package} is required for this functionality.")
+
+
+try:
+    import geopandas as gpd
+except ImportError:
+    gpd = _MissingOptionalDependency("geopandas")
+
+try:
+    from rasterio.features import shapes
+    from rasterio.transform import from_origin
+except ImportError:
+    shapes = _MissingOptionalDependency("rasterio")
+    from_origin = _MissingOptionalDependency("rasterio")
+
+try:
+    from shapely.geometry import Polygon, shape
+    from shapely.ops import unary_union
+except ImportError:
+    Polygon = _MissingOptionalDependency("shapely")
+    shape = _MissingOptionalDependency("shapely")
+    unary_union = _MissingOptionalDependency("shapely")
 
 logger = logging.getLogger(__name__)
 
