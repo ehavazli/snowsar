@@ -21,7 +21,6 @@ jobs:
           use-mamba: true
 
       - name: Run tests
-        shell: bash -el {0}
         run: |
-          pip install pytest
-          pytest -q
+          conda run -n snowsar-ci pip install pytest
+          conda run -n snowsar-ci pytest -q
