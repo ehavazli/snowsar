@@ -7,3 +7,4 @@ dependencies:
   - pandas
   - h5py
   - scipy
+  - pytest

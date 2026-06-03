@@ -20,14 +20,5 @@ jobs:
           environment-file: environment-ci.yml
           use-mamba: true
 
-      - name: Debug environment
-        run: |
-          conda run -n snowsar-ci which python
-          conda run -n snowsar-ci python --version
-          conda run -n snowsar-ci python -c "import sys; print(sys.path)"
-          conda run -n snowsar-ci conda list | grep h5py
-
       - name: Run tests
-        run: |
-          conda run -n snowsar-ci pip install pytest
-          conda run -n snowsar-ci pytest -q
+        run: conda run -n snowsar-ci pytest -q
