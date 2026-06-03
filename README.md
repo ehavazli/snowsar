@@ -22,7 +22,7 @@ Alternatively, to create it manually:
 
 ```bash
 git clone git@github.com:ehavazli/snowsar.git
-conda create -n snowsar rasterio sardem shapely geopandas contextily leafmap mintpy libgdal-hdf5 h5py earthaccess scipy pip
+conda create -n snowsar -c conda-forge rasterio sardem shapely geopandas contextily leafmap mintpy libgdal-hdf5 h5py earthaccess scipy pip
 conda activate snowsar
 ```
 
@@ -37,7 +37,7 @@ pip install -e .
 If you already have the `snowsar` environment, you can install missing packages manually:
 
 ```bash
-conda install -c conda-forge rasterio sardem shapely geopandas contextily leafmap libgdal-hdf5 h5py earthaccess scipy
+conda install -c conda-forge rasterio sardem shapely geopandas contextily leafmap libgdal-hdf5 h5py earthaccess scipy mintpy
 pip install -e .
 ```
 

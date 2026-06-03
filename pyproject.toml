@@ -21,13 +21,15 @@ dependencies = [
     "numpy",
     "pandas",
     "rasterio",
-    "pytest",
     "sardem",
     "scipy",
     "shapely",
     "ulmo",
     "suds-jurko @ https://github.com/drivendataorg/suds-jurko-wheel/releases/download/v0.6/suds_jurko-0.6-py3-none-any.whl",
 ]
+
+[project.optional-dependencies]
+test = ["pytest"]
 
 [tool.setuptools.packages.find]
 where = ["."]
