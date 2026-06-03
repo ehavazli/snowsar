@@ -169,9 +169,25 @@ def test_cache_nisar_granule_reuses_existing_file(monkeypatch, tmp_path):
     assert download_calls == []
 
 
-def test_cache_nisar_granule_reuses_existing_file_url(tmp_path):
+def test_cache_nisar_granule_reuses_existing_file_url(monkeypatch, tmp_path):
     """file:// URLs to local HDF5 files should use the local cache fast path."""
     from snowsar.utils.stream_utils import cache_nisar_granule, get_nisar_cache_path
+
+    fake_earthaccess = types.SimpleNamespace(
+        auth_environ=lambda: (_ for _ in ()).throw(
+            AssertionError("earthaccess should not be used for local files")
+        ),
+        download=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("earthaccess.download should not be used for local files")
+        ),
+        login=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("earthaccess.login should not be used for local files")
+        ),
+        open=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("earthaccess.open should not be used for local files")
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "earthaccess", fake_earthaccess)
 
     local_h5 = _write_local_h5(tmp_path / "source_file_url.h5")
     granule = local_h5.as_uri()
@@ -187,6 +203,22 @@ def test_cache_nisar_granule_reuses_existing_file_url(tmp_path):
 def test_cache_nisar_granule_reuses_existing_tilde_path(monkeypatch, tmp_path):
     """~/ paths should be expanded before deciding whether to reuse a local file."""
     from snowsar.utils.stream_utils import cache_nisar_granule, get_nisar_cache_path
+
+    fake_earthaccess = types.SimpleNamespace(
+        auth_environ=lambda: (_ for _ in ()).throw(
+            AssertionError("earthaccess should not be used for local files")
+        ),
+        download=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("earthaccess.download should not be used for local files")
+        ),
+        login=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("earthaccess.login should not be used for local files")
+        ),
+        open=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("earthaccess.open should not be used for local files")
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "earthaccess", fake_earthaccess)
 
     fake_home = tmp_path / "home"
     fake_home.mkdir()
