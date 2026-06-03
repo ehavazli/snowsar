@@ -20,9 +20,9 @@ jobs:
           environment-file: environment-ci.yml
           use-mamba: true
 
-      - name: Install package
+      - name: Install test dependencies
         shell: bash -el {0}
-        run: pip install -e .[test]
+        run: pip install pytest
 
       - name: Run tests
         shell: bash -el {0}
