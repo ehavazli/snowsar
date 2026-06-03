@@ -15,9 +15,9 @@ jobs:
 
       - uses: conda-incubator/setup-miniconda@fc2d68f6413eb2d87b895e92f8584b5b94a10167 # v3
         with:
-          activate-environment: snowsar
+          activate-environment: snowsar-ci
           auto-activate-base: false
-          environment-file: environment.yml
+          environment-file: environment-ci.yml
           use-mamba: true
 
       - name: Install package
