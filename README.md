@@ -21,16 +21,18 @@ This repository is easiest to use from the provided Conda environment because se
 To create a new Conda environment named `snowsar` and install the required packages:
 
 ```bash
-git clone git@github.com:ehavazli/snowsar.git;
-conda env create -f environment.yml;
-conda activate snowsar;
+git clone git@github.com:ehavazli/snowsar.git
+cd snowsar
+conda env create -f environment.yml
+conda activate snowsar
 ```
 
-Alternatively, to create it manually:
+Alternatively, if you want to create the Conda environment manually, install the core compiled/geospatial stack first:
 
 ```bash
 git clone git@github.com:ehavazli/snowsar.git
-conda create -n snowsar -c conda-forge rasterio sardem shapely geopandas contextily leafmap mintpy libgdal-hdf5 h5py earthaccess scipy pip
+cd snowsar
+conda create -n snowsar -c conda-forge python=3.10 rasterio gdal sardem shapely geopandas contextily leafmap folium matplotlib mintpy libgdal-hdf5 h5py earthaccess scipy jupyterlab nb_conda_kernels pytest pip
 conda activate snowsar
 ```
 
@@ -39,6 +41,8 @@ After activating the environment, install the package into that environment:
 ```bash
 pip install -e .
 ```
+
+That editable install pulls in the remaining Python package dependencies declared in `pyproject.toml`, including `ulmo`, `asf-search`, and `suds-jurko`.
 
 ## Cloud Streaming for NISAR Data
 
@@ -84,10 +88,10 @@ See [STREAMING.md](STREAMING.md) for complete documentation.
 
 ### If the Environment Already Exists
 
-If you already have the `snowsar` environment, you can install missing packages manually:
+If you already have the `snowsar` environment, you can install missing Conda packages manually and then refresh the Python package install:
 
 ```bash
-conda install -c conda-forge rasterio sardem shapely geopandas contextily leafmap libgdal-hdf5 h5py earthaccess scipy mintpy
+conda install -c conda-forge rasterio gdal sardem shapely geopandas contextily leafmap folium matplotlib libgdal-hdf5 h5py earthaccess scipy mintpy jupyterlab nb_conda_kernels pytest
 pip install -e .
 ```
 
