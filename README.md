@@ -27,12 +27,12 @@ conda env create -f environment.yml
 conda activate snowsar
 ```
 
-Alternatively, if you want to create the Conda environment manually, install the core compiled/geospatial stack first:
+Alternatively, if you want to create the Conda environment manually, install the core compiled/geospatial stack first with Python 3.10 or newer:
 
 ```bash
 git clone git@github.com:ehavazli/snowsar.git
 cd snowsar
-conda create -n snowsar -c conda-forge python=3.10 rasterio gdal sardem shapely geopandas contextily leafmap folium matplotlib mintpy libgdal-hdf5 h5py earthaccess scipy jupyterlab nb_conda_kernels pytest pip
+conda create -n snowsar -c conda-forge "python>=3.10" rasterio gdal sardem shapely geopandas contextily leafmap folium matplotlib mintpy libgdal-hdf5 h5py earthaccess scipy jupyterlab nb_conda_kernels pytest pip
 conda activate snowsar
 ```
 

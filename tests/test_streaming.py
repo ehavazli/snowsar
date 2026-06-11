@@ -855,6 +855,31 @@ def test_download_with_progress_authenticates_asf_search(monkeypatch, tmp_path):
     assert received == {"path": str(tmp_path), "session": session}
 
 
+def test_download_with_progress_returns_existing_asf_file_when_skipping(
+    monkeypatch, tmp_path
+):
+    """ASF Search downloads should report existing files when overwrite is false."""
+    from snowsar.utils import stream_utils
+
+    class DownloadableAsfResult(FakeAsfResult):
+        def download(self, path, session):
+            raise AssertionError("download should not be called for existing files")
+
+    existing = tmp_path / "NISAR_asf.h5"
+    existing.write_bytes(b"existing")
+
+    monkeypatch.setitem(sys.modules, "asf_search", types.SimpleNamespace())
+    monkeypatch.setattr(stream_utils, "setup_asf_search_auth", lambda: object())
+
+    paths = stream_utils.download_with_progress(
+        [DownloadableAsfResult()],
+        output_dir=tmp_path,
+        provider="asf_search",
+    )
+
+    assert paths == [existing]
+
+
 def test_open_nisar_h5_stream_rejects_unvalidated_provider():
     """Only the validated earthaccess provider should be accepted for streaming."""
     from snowsar.utils.stream_utils import open_nisar_h5_stream
@@ -869,6 +894,18 @@ def test_search_nisar_data_rejects_invalid_provider():
 
     with pytest.raises(ValueError, match="Unknown provider"):
         search_nisar_data(processing_level="GUNW", provider="invalid")
+
+
+def test_search_nisar_data_rejects_flight_direction_for_earthaccess():
+    """Earthaccess searches should fail fast on unsupported flight direction."""
+    from snowsar.utils.stream_utils import search_nisar_data
+
+    with pytest.raises(ValueError, match="provider='earthaccess'"):
+        search_nisar_data(
+            processing_level="GUNW",
+            provider="earthaccess",
+            flight_direction="DESCENDING",
+        )
 
 
 def test_search_nisar_data_converts_bbox_for_asf_search(monkeypatch):

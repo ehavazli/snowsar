@@ -1392,6 +1392,11 @@ def search_nisar_data(
     Search for NISAR products using earthaccess or ASF Search.
     """
     if provider == "earthaccess":
+        if flight_direction is not None:
+            raise ValueError(
+                "flight_direction is not supported when provider='earthaccess'. "
+                "Use provider='asf_search' to filter by flight direction."
+            )
         return _search_with_earthaccess(
             bbox=bbox,
             start_date=start_date,
@@ -1542,6 +1547,7 @@ def download_with_progress(
             filename = _granule_basename(result)
             target_file = output_dir / filename
             if target_file.exists() and not overwrite:
+                downloaded.append(target_file)
                 continue
             result.download(path=str(output_dir), session=session)
             downloaded.append(target_file)
