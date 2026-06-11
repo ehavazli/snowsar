@@ -63,11 +63,22 @@ _LAZY_IMPORTS = {
     "download_dem_for_gunw_with_sardem": ("nisar_utils", "download_dem_for_gunw_with_sardem"),
     # Streaming / cache
     "setup_earthaccess_auth": ("stream_utils", "setup_earthaccess_auth"),
+    "setup_asf_search_auth": ("stream_utils", "setup_asf_search_auth"),
     "open_nisar_h5_stream": ("stream_utils", "open_nisar_h5_stream"),
     "search_nisar_data": ("stream_utils", "search_nisar_data"),
     "download_with_progress": ("stream_utils", "download_with_progress"),
     "cache_nisar_granule": ("stream_utils", "cache_nisar_granule"),
     "get_nisar_cache_path": ("stream_utils", "get_nisar_cache_path"),
+    "get_nisar_subset_cache_path": ("stream_utils", "get_nisar_subset_cache_path"),
+    "get_nisar_granule_name": ("stream_utils", "get_nisar_granule_name"),
+    "get_nisar_granule_urls": ("stream_utils", "get_nisar_granule_urls"),
+    "read_nisar_h5_bbox": ("stream_utils", "read_nisar_h5_bbox"),
+    "read_nisar_h5_bbox_cached": ("stream_utils", "read_nisar_h5_bbox_cached"),
+    "extract_gunw_layers_to_geotiff_bbox_streamed": (
+        "stream_utils",
+        "extract_gunw_layers_to_geotiff_bbox_streamed",
+    ),
+    "write_nisar_subset_geotiff": ("stream_utils", "write_nisar_subset_geotiff"),
 }
 
 __all__ = list(_LAZY_IMPORTS.keys())
