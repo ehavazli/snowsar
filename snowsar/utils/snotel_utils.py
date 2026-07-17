@@ -226,6 +226,80 @@ def filter_sites_by_polygon(
     return sites.loc[mask].copy()
 
 
+def _iter_date_chunks(
+    start_date: str, end_date: str, chunk_days: int
+) -> list[tuple[str, str]]:
+    """Split an inclusive date range into smaller inclusive chunks."""
+    start = pd.to_datetime(start_date).normalize()
+    end = pd.to_datetime(end_date).normalize()
+
+    if end < start:
+        raise ValueError("end_date must be on or after start_date")
+    if chunk_days < 1:
+        raise ValueError("request_chunk_days must be >= 1")
+
+    chunks: list[tuple[str, str]] = []
+    chunk_span = pd.Timedelta(days=chunk_days - 1)
+    current_start = start
+
+    while current_start <= end:
+        current_end = min(current_start + chunk_span, end)
+        chunks.append(
+            (
+                current_start.strftime("%Y-%m-%d"),
+                current_end.strftime("%Y-%m-%d"),
+            )
+        )
+        current_start = current_end + pd.Timedelta(days=1)
+
+    return chunks
+
+
+def _fetch_values_chunked(
+    ulmo,
+    wsdlurl: str,
+    site_code: str,
+    variable_code: str,
+    start_date: str,
+    end_date: str,
+    *,
+    request_chunk_days: int,
+    request_timeout: float | None,
+) -> pd.DataFrame:
+    """Fetch one site/variable across smaller date chunks and combine rows."""
+    frames: list[pd.DataFrame] = []
+
+    for chunk_start, chunk_end in _iter_date_chunks(
+        start_date, end_date, request_chunk_days
+    ):
+        resp = ulmo.cuahsi.wof.get_values(
+            wsdlurl,
+            site_code,
+            variable_code,
+            start=chunk_start,
+            end=chunk_end,
+            timeout=request_timeout,
+        )
+        values = resp.get("values", None)
+        if not values:
+            continue
+
+        frame = pd.DataFrame.from_dict(values)
+        if frame.empty:
+            continue
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    if "date_time_utc" in combined.columns:
+        combined = combined.drop_duplicates(subset=["date_time_utc"]).copy()
+    else:
+        combined = combined.drop_duplicates().copy()
+    return combined
+
+
 def fetch_snotel_timeseries(
     snotel_sites: pd.DataFrame,
     wsdlurl: str,
@@ -235,6 +309,8 @@ def fetch_snotel_timeseries(
     reference_date: str = "12-01",
     obs_hour: int = 0,
     include_temperature: bool = True,
+    request_chunk_days: int = 31,
+    request_timeout: float | None = None,
     errors: str = "warn",
 ) -> Dict[str, pd.DataFrame]:
     """
@@ -265,6 +341,12 @@ def fetch_snotel_timeseries(
     include_temperature : bool, default True
         Whether to fetch and include temperature (TOBS_H) data. If False or
         if temperature data unavailable, temp_c column will contain NaN.
+    request_chunk_days : int, default 31
+        Maximum number of days to request per WaterOneFlow call. Smaller chunks
+        reduce service-side query failures for long hourly ranges.
+    request_timeout : float or None, default None
+        Optional SOAP request timeout in seconds for each WaterOneFlow call.
+        If None, ulmo uses its default timeout.
     errors : {"warn", "raise"}, default "warn"
         If "warn", log site-level fetch failures and continue. If "raise",
         re-raise fetch failures for reproducible batch runs.
@@ -316,6 +398,8 @@ def fetch_snotel_timeseries(
 
     if not (0 <= obs_hour <= 23):
         raise ValueError("obs_hour must be in [0, 23]")
+    if request_chunk_days < 1:
+        raise ValueError("request_chunk_days must be >= 1")
     if errors not in {"warn", "raise"}:
         raise ValueError("errors must be either 'warn' or 'raise'")
 
@@ -332,14 +416,16 @@ def fetch_snotel_timeseries(
     ):
         try:
             # --- SWE ---
-            swe_resp = ulmo.cuahsi.wof.get_values(
-                wsdlurl, site_code, "WTEQ_H", start=start_date, end=end_date
+            swe_df = _fetch_values_chunked(
+                ulmo,
+                wsdlurl,
+                site_code,
+                "WTEQ_H",
+                start_date,
+                end_date,
+                request_chunk_days=request_chunk_days,
+                request_timeout=request_timeout,
             )
-            swe_vals = swe_resp.get("values", None)
-            if not swe_vals:
-                continue
-
-            swe_df = pd.DataFrame.from_dict(swe_vals)
             if swe_df.empty:
                 continue
 
@@ -397,61 +483,52 @@ def fetch_snotel_timeseries(
 
             if include_temperature:
                 try:
-                    tmp_resp = ulmo.cuahsi.wof.get_values(
+                    tmp_df = _fetch_values_chunked(
+                        ulmo,
                         wsdlurl,
                         site_code,
                         "TOBS_H",
-                        start=start_date,
-                        end=end_date,
+                        start_date,
+                        end_date,
+                        request_chunk_days=request_chunk_days,
+                        request_timeout=request_timeout,
                     )
-                    tmp_vals = tmp_resp.get("values", None)
-                    if tmp_vals:
-                        tmp_df = pd.DataFrame.from_dict(tmp_vals)
+                    if not tmp_df.empty:
+                        if "quality_control_level_code" in tmp_df.columns:
+                            tmp_df = tmp_df[
+                                tmp_df["quality_control_level_code"] == "1"
+                            ]
 
-                        if not tmp_df.empty:
-                            if "quality_control_level_code" in tmp_df.columns:
-                                tmp_df = tmp_df[
-                                    tmp_df["quality_control_level_code"]
-                                    == "1"
-                                ]
+                        tmp_df = tmp_df.drop(
+                            columns=[c for c in drop_cols if c in tmp_df.columns],
+                            errors="ignore",
+                        )
 
-                            tmp_df = tmp_df.drop(
-                                columns=[
-                                    c
-                                    for c in drop_cols
-                                    if c in tmp_df.columns
-                                ],
-                                errors="ignore",
+                        if (
+                            "date_time_utc" in tmp_df.columns
+                            and "value" in tmp_df.columns
+                        ):
+                            tmp_df["date_time_utc"] = (
+                                pd.to_datetime(
+                                    tmp_df["date_time_utc"],
+                                    errors="coerce",
+                                    utc=True,
+                                )
+                                .dt.tz_convert(None)
                             )
+                            tmp_df = tmp_df.dropna(
+                                subset=["date_time_utc"]
+                            ).copy()
 
-                            if (
-                                "date_time_utc" in tmp_df.columns
-                                and "value" in tmp_df.columns
-                            ):
-                                tmp_df["date_time_utc"] = (
-                                    pd.to_datetime(
-                                        tmp_df["date_time_utc"],
-                                        errors="coerce",
-                                        utc=True,
-                                    )
-                                    .dt.tz_convert(None)
-                                )
-                                tmp_df = tmp_df.dropna(
-                                    subset=["date_time_utc"]
-                                ).copy()
+                            tmp_df["value"] = pd.to_numeric(
+                                tmp_df["value"], errors="coerce"
+                            ).astype("float32")
 
-                                tmp_df["value"] = pd.to_numeric(
-                                    tmp_df["value"], errors="coerce"
-                                ).astype("float32")
+                            tmp_df["temp_c"] = tmp_df["value"].apply(f_to_c)
 
-                                tmp_df["temp_c"] = tmp_df["value"].apply(
-                                    f_to_c
-                                )
-
-                                tmp_at_hour = tmp_df[
-                                    tmp_df["date_time_utc"].dt.hour
-                                    == obs_hour
-                                ][["date_time_utc", "temp_c"]].copy()
+                            tmp_at_hour = tmp_df[
+                                tmp_df["date_time_utc"].dt.hour == obs_hour
+                            ][["date_time_utc", "temp_c"]].copy()
 
                 except Exception as e_temp:
                     if errors == "raise":
