@@ -10,6 +10,17 @@ if TYPE_CHECKING:
 # Find any YYYYMMDD tokens (HyP3 names typically include 2 dates)
 _DATE_RE = re.compile(r"(\d{8})")
 
+# HyP3 MintPy-relevant GeoTIFF suffixes
+HYP3_MINTPY_SUFFIXES = (
+    "_water_mask.tif",
+    "_corr.tif",
+    "_unw_phase.tif",
+    "_dem.tif",
+    "_lv_theta.tif",
+    "_lv_phi.tif",
+    "_inc_map.tif",
+)
+
 
 def _parse_yyyymmdd(token: str):
     """Return a normalized pandas timestamp for a YYYYMMDD token."""
@@ -95,6 +106,256 @@ def parse_date_pairs_from_hyp3_filenames(
         if len(parsed) == 2:
             pairs.add(tuple(parsed))
     return sorted(pairs)
+
+
+def common_geotiff_overlap(
+    tif_paths: Sequence[Union[str, Path]],
+) -> Tuple[float, float, float, float]:
+    """
+    Return common overlap bounds across multiple GeoTIFFs as (left, top, right, bottom).
+
+    Computes the intersection of all raster bounds. All rasters must share the same CRS.
+    Returns bounds in GDAL projWin order: (ulx, uly, lrx, lry).
+
+    Parameters
+    ----------
+    tif_paths : Sequence[str or Path]
+        Paths to GeoTIFF files
+
+    Returns
+    -------
+    Tuple[float, float, float, float]
+        (left, top, right, bottom) bounds of common overlap in source CRS
+
+    Raises
+    ------
+    ValueError
+        If paths is empty, rasters have no CRS, CRS mismatch, or no overlap exists
+
+    Examples
+    --------
+    >>> tif_files = [
+    ...     "S1_20201215_20201227_VV_unw_phase.tif",
+    ...     "S1_20201227_20210108_VV_unw_phase.tif"
+    ... ]
+    >>> bounds = common_geotiff_overlap(tif_files)
+    >>> left, top, right, bottom = bounds
+    """
+    try:
+        import rasterio
+    except Exception as e:
+        raise ImportError(
+            "rasterio is required to compute GeoTIFF overlap."
+        ) from e
+
+    tif_paths = [Path(p) for p in tif_paths]
+    if not tif_paths:
+        raise ValueError("tif_paths cannot be empty")
+
+    first_crs = None
+    first_file = None
+    left_vals, right_vals, bottom_vals, top_vals = [], [], [], []
+
+    for idx, tif in enumerate(tif_paths):
+        with rasterio.open(tif) as src:
+            if src.crs is None:
+                raise ValueError(f"Raster has no CRS: {tif}")
+
+            if idx == 0:
+                first_crs = src.crs
+                first_file = tif
+            elif src.crs != first_crs:
+                raise ValueError(
+                    f"CRS mismatch:\n"
+                    f"  {first_file.name}: {first_crs}\n"
+                    f"  {tif.name}: {src.crs}"
+                )
+
+            bounds = src.bounds
+            left_vals.append(bounds.left)
+            right_vals.append(bounds.right)
+            bottom_vals.append(bounds.bottom)
+            top_vals.append(bounds.top)
+
+    left = max(left_vals)
+    right = min(right_vals)
+    bottom = max(bottom_vals)
+    top = min(top_vals)
+
+    if left >= right or bottom >= top:
+        raise ValueError(
+            f"No overlap exists across rasters:\n"
+            f"  computed bounds: left={left}, top={top}, right={right}, bottom={bottom}"
+        )
+
+    return (left, top, right, bottom)
+
+
+def clip_geotiff_to_bounds(
+    src_path: Union[str, Path],
+    dst_path: Union[str, Path],
+    bounds: Tuple[float, float, float, float],
+    *,
+    overwrite: bool = False,
+) -> Path:
+    """
+    Clip one GeoTIFF to (left, top, right, bottom) bounds in its native CRS.
+
+    Parameters
+    ----------
+    src_path : str or Path
+        Path to input GeoTIFF
+    dst_path : str or Path
+        Path for output clipped GeoTIFF
+    bounds : Tuple[float, float, float, float]
+        (left, top, right, bottom) in source raster CRS
+    overwrite : bool, default False
+        If True, overwrite existing output file. If False, skip if output exists.
+
+    Returns
+    -------
+    Path
+        Path to created clipped GeoTIFF
+
+    Raises
+    ------
+    ValueError
+        If bounds don't overlap raster or output exists and overwrite=False
+
+    Examples
+    --------
+    >>> bounds = (123.4, 45.6, 123.5, 45.5)  # left, top, right, bottom
+    >>> clip_geotiff_to_bounds("input.tif", "output.tif", bounds)
+    PosixPath('output.tif')
+    """
+    try:
+        import rasterio
+        from rasterio.windows import from_bounds
+    except Exception as e:
+        raise ImportError(
+            "rasterio is required to clip GeoTIFF files."
+        ) from e
+
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+
+    if dst_path.exists() and not overwrite:
+        raise ValueError(f"Output file exists and overwrite=False: {dst_path}")
+
+    left, top, right, bottom = bounds
+
+    with rasterio.open(src_path) as src:
+        window = from_bounds(left, bottom, right, top, src.transform)
+
+        # Floor window bounds to match MintPy indexing
+        import numpy as np
+        col_off = max(0, int(np.floor(window.col_off)))
+        row_off = max(0, int(np.floor(window.row_off)))
+        col_end = min(src.width, int(np.floor(window.col_off + window.width)))
+        row_end = min(src.height, int(np.floor(window.row_off + window.height)))
+
+        from rasterio.windows import Window
+        window = Window(
+            col_off=col_off,
+            row_off=row_off,
+            width=col_end - col_off,
+            height=row_end - row_off,
+        )
+
+        if window.width <= 0 or window.height <= 0:
+            raise ValueError(
+                f"Bounds {bounds} don't overlap {src_path}"
+            )
+
+        data = src.read(window=window)
+        transform = src.window_transform(window)
+        profile = src.profile.copy()
+        profile.update(
+            height=window.height,
+            width=window.width,
+            transform=transform,
+        )
+
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            dst.write(data)
+
+    return dst_path
+
+
+def clip_hyp3_products_to_common_overlap(
+    data_dir: Union[str, Path],
+    *,
+    dem_pattern: str = "*/*_dem.tif",
+    suffixes: Sequence[str] = HYP3_MINTPY_SUFFIXES,
+    overwrite: bool = False,
+) -> List[Path]:
+    """
+    Clip HyP3 MintPy input products to their common DEM overlap.
+
+    Finds all DEM files matching dem_pattern, computes common overlap bounds,
+    then clips all files matching suffixes to that extent. Output files are
+    written as siblings with '_clipped' suffix added to stem.
+
+    Parameters
+    ----------
+    data_dir : str or Path
+        Directory containing HyP3 products (typically organized as subdirs per pair)
+    dem_pattern : str, default "*/*_dem.tif"
+        Glob pattern to find DEM files for overlap computation
+    suffixes : Sequence[str], default HYP3_MINTPY_SUFFIXES
+        File suffixes to clip. Each matching file will be clipped to common bounds.
+    overwrite : bool, default False
+        If True, overwrite existing clipped files. If False, skip existing outputs.
+
+    Returns
+    -------
+    List[Path]
+        Paths to all clipped output files (existing skipped files are included)
+
+    Raises
+    ------
+    ValueError
+        If no DEM files found or no overlap exists
+
+    Examples
+    --------
+    >>> clipped = clip_hyp3_products_to_common_overlap(
+    ...     "hyp3_data",
+    ...     dem_pattern="*/*_dem.tif"
+    ... )
+    >>> len(clipped)
+    42
+    """
+    data_dir = Path(data_dir)
+
+    # Find DEM files and compute common overlap
+    dem_files = sorted(data_dir.glob(dem_pattern))
+    if not dem_files:
+        raise ValueError(f"No DEM files found with pattern '{dem_pattern}' in {data_dir}")
+
+    overlap = common_geotiff_overlap(dem_files)
+
+    # Clip all matching suffixes
+    output_paths = []
+    for suffix in suffixes:
+        for file in data_dir.rglob(f"*{suffix}"):
+            dst_file = file.parent / f"{file.stem}_clipped{file.suffix}"
+
+            if dst_file.exists() and not overwrite:
+                output_paths.append(dst_file)
+                continue
+
+            try:
+                clipped = clip_geotiff_to_bounds(file, dst_file, overlap, overwrite=overwrite)
+                output_paths.append(clipped)
+            except ValueError as e:
+                # Skip files that don't overlap (e.g., different subswaths)
+                import warnings
+                warnings.warn(f"Skipping {file.name}: {e}", UserWarning)
+                continue
+
+    return output_paths
 
 
 def footprint_from_geotiffs(

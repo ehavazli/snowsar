@@ -19,6 +19,9 @@ _LAZY_IMPORTS = {
     "parse_unique_dates_from_hyp3_filenames": ("hyp3_utils", "parse_unique_dates_from_hyp3_filenames"),
     "parse_date_pairs_from_hyp3_filenames": ("hyp3_utils", "parse_date_pairs_from_hyp3_filenames"),
     "footprint_from_geotiffs": ("hyp3_utils", "footprint_from_geotiffs"),
+    "common_geotiff_overlap": ("hyp3_utils", "common_geotiff_overlap"),
+    "clip_geotiff_to_bounds": ("hyp3_utils", "clip_geotiff_to_bounds"),
+    "clip_hyp3_products_to_common_overlap": ("hyp3_utils", "clip_hyp3_products_to_common_overlap"),
     # MintPy
     "mintpy_dates_from_timeseries_h5": ("mintpy_utils", "mintpy_dates_from_timeseries_h5"),
     "mintpy_footprint_from_timeseries_h5": ("mintpy_utils", "mintpy_footprint_from_timeseries_h5"),
