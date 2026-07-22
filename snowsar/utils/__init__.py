@@ -22,6 +22,11 @@ _LAZY_IMPORTS = {
     "common_geotiff_overlap": ("hyp3_utils", "common_geotiff_overlap"),
     "clip_geotiff_to_bounds": ("hyp3_utils", "clip_geotiff_to_bounds"),
     "clip_hyp3_products_to_common_overlap": ("hyp3_utils", "clip_hyp3_products_to_common_overlap"),
+    # HyP3 visualization
+    "read_geotiff_as_array": ("hyp3_viz_utils", "read_geotiff_as_array"),
+    "find_matching_products": ("hyp3_viz_utils", "find_matching_products"),
+    "plot_hyp3_trio": ("hyp3_viz_utils", "plot_hyp3_trio"),
+    "plot_correlation_histogram": ("hyp3_viz_utils", "plot_correlation_histogram"),
     # MintPy
     "mintpy_dates_from_timeseries_h5": ("mintpy_utils", "mintpy_dates_from_timeseries_h5"),
     "mintpy_footprint_from_timeseries_h5": ("mintpy_utils", "mintpy_footprint_from_timeseries_h5"),
