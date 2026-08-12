@@ -27,9 +27,7 @@ def _parse_yyyymmdd(token: str):
     try:
         import pandas as pd
     except Exception as e:
-        raise ImportError(
-            "pandas is required to parse HyP3 acquisition dates."
-        ) from e
+        raise ImportError("pandas is required to parse HyP3 acquisition dates.") from e
 
     return pd.to_datetime(token, format="%Y%m%d").normalize()
 
@@ -144,9 +142,7 @@ def common_geotiff_overlap(
     try:
         import rasterio
     except Exception as e:
-        raise ImportError(
-            "rasterio is required to compute GeoTIFF overlap."
-        ) from e
+        raise ImportError("rasterio is required to compute GeoTIFF overlap.") from e
 
     tif_paths = [Path(p) for p in tif_paths]
     if not tif_paths:
@@ -232,9 +228,7 @@ def clip_geotiff_to_bounds(
         import rasterio
         from rasterio.windows import from_bounds
     except Exception as e:
-        raise ImportError(
-            "rasterio is required to clip GeoTIFF files."
-        ) from e
+        raise ImportError("rasterio is required to clip GeoTIFF files.") from e
 
     src_path = Path(src_path)
     dst_path = Path(dst_path)
@@ -249,12 +243,14 @@ def clip_geotiff_to_bounds(
 
         # Floor window bounds to match MintPy indexing
         import numpy as np
+
         col_off = max(0, int(np.floor(window.col_off)))
         row_off = max(0, int(np.floor(window.row_off)))
         col_end = min(src.width, int(np.floor(window.col_off + window.width)))
         row_end = min(src.height, int(np.floor(window.row_off + window.height)))
 
         from rasterio.windows import Window
+
         window = Window(
             col_off=col_off,
             row_off=row_off,
@@ -263,9 +259,7 @@ def clip_geotiff_to_bounds(
         )
 
         if window.width <= 0 or window.height <= 0:
-            raise ValueError(
-                f"Bounds {bounds} don't overlap {src_path}"
-            )
+            raise ValueError(f"Bounds {bounds} don't overlap {src_path}")
 
         data = src.read(window=window)
         transform = src.window_transform(window)
@@ -330,16 +324,18 @@ def clip_hyp3_products_to_common_overlap(
     data_dir = Path(data_dir)
 
     # Find DEM files and compute common overlap
-    dem_files = sorted(data_dir.glob(dem_pattern))
+    dem_files = sorted(data_dir.rglob(dem_pattern, recurse_symlinks=True))
     if not dem_files:
-        raise ValueError(f"No DEM files found with pattern '{dem_pattern}' in {data_dir}")
+        raise ValueError(
+            f"No DEM files found with pattern '{dem_pattern}' in {data_dir}"
+        )
 
     overlap = common_geotiff_overlap(dem_files)
 
     # Clip all matching suffixes
     output_paths = []
     for suffix in suffixes:
-        for file in data_dir.rglob(f"*{suffix}"):
+        for file in data_dir.rglob(f"*{suffix}", recurse_symlinks=True):
             dst_file = file.parent / f"{file.stem}_clipped{file.suffix}"
 
             if dst_file.exists() and not overwrite:
@@ -347,11 +343,14 @@ def clip_hyp3_products_to_common_overlap(
                 continue
 
             try:
-                clipped = clip_geotiff_to_bounds(file, dst_file, overlap, overwrite=overwrite)
+                clipped = clip_geotiff_to_bounds(
+                    file, dst_file, overlap, overwrite=overwrite
+                )
                 output_paths.append(clipped)
             except ValueError as e:
                 # Skip files that don't overlap (e.g., different subswaths)
                 import warnings
+
                 warnings.warn(f"Skipping {file.name}: {e}", UserWarning)
                 continue
 
@@ -445,10 +444,11 @@ def footprint_from_geotiffs(
                     )
                 # If out_crs is None, we can proceed but warn
                 import warnings
+
                 warnings.warn(
                     f"Raster has no CRS defined: {tif}\n"
                     f"  Geometries will have undefined CRS.",
-                    UserWarning
+                    UserWarning,
                 )
 
             # Check CRS consistency across files
@@ -485,9 +485,7 @@ def footprint_from_geotiffs(
                     if ring_poly.area > hole_area_min:
                         list_interiors.append(interior)
 
-                temp_pol = Polygon(
-                    polygon.exterior.coords, holes=list_interiors
-                )
+                temp_pol = Polygon(polygon.exterior.coords, holes=list_interiors)
                 if not temp_pol.is_empty:
                     list_parts.append(temp_pol)
 

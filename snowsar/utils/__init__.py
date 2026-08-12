@@ -30,6 +30,17 @@ _LAZY_IMPORTS = {
     # MintPy
     "mintpy_dates_from_timeseries_h5": ("mintpy_utils", "mintpy_dates_from_timeseries_h5"),
     "mintpy_footprint_from_timeseries_h5": ("mintpy_utils", "mintpy_footprint_from_timeseries_h5"),
+    "decode_h5_dates": ("mintpy_utils", "decode_h5_dates"),
+    "mintpy_crs_from_attrs": ("mintpy_utils", "mintpy_crs_from_attrs"),
+    "mintpy_grid_centers": ("mintpy_utils", "mintpy_grid_centers"),
+    "station_xy_for_grid": ("mintpy_utils", "station_xy_for_grid"),
+    "build_station_windows": ("mintpy_utils", "build_station_windows"),
+    "read_mintpy_displacement_series_at_latlon": ("mintpy_utils", "read_mintpy_displacement_series_at_latlon"),
+    "sample_mintpy_incidence_angle": ("mintpy_utils", "sample_mintpy_incidence_angle"),
+    "displacement_to_swe_cm": ("mintpy_utils", "displacement_to_swe_cm"),
+    "align_insar_swe_with_snotel": ("mintpy_utils", "align_insar_swe_with_snotel"),
+    "compare_station_windows": ("mintpy_utils", "compare_station_windows"),
+    "summarize_insar_swe_metrics": ("mintpy_utils", "summarize_insar_swe_metrics"),
     # MintPy/LIDAR grids
     "get_mintpy_grid": ("lidar_utils", "get_mintpy_grid"),
     "get_geocoded_hdf5_grid": ("lidar_utils", "get_geocoded_hdf5_grid"),
@@ -57,6 +68,9 @@ _LAZY_IMPORTS = {
     "fetch_snotel_sites": ("snotel_utils", "fetch_snotel_sites"),
     "filter_sites_by_polygon": ("snotel_utils", "filter_sites_by_polygon"),
     "fetch_snotel_timeseries": ("snotel_utils", "fetch_snotel_timeseries"),
+    "build_snotel_value_lookup": ("snotel_utils", "build_snotel_value_lookup"),
+    "summarize_snotel_results": ("snotel_utils", "summarize_snotel_results"),
+    "snotel_site_table_from_results": ("snotel_utils", "snotel_site_table_from_results"),
     # IO
     "save_pickle": ("io_utils", "save_pickle"),
     "load_pickle": ("io_utils", "load_pickle"),

@@ -226,6 +226,118 @@ def filter_sites_by_polygon(
     return sites.loc[mask].copy()
 
 
+def build_snotel_value_lookup(
+    swe_data: Dict[str, pd.DataFrame],
+) -> Dict[str, pd.Series]:
+    """
+    Build per-station daily SWE lookup series from cached SNOTEL tables.
+
+    Parameters
+    ----------
+    swe_data : Dict[str, pd.DataFrame]
+        Mapping of station name to cached SNOTEL observation table.
+
+    Returns
+    -------
+    Dict[str, pd.Series]
+        Mapping of station name to daily normalized SWE series indexed by date.
+    """
+    lookup = {}
+    for site_name, df in swe_data.items():
+        tmp = df.copy()
+        tmp["date"] = pd.to_datetime(tmp["date_time_utc"]).dt.normalize()
+        lookup[site_name] = tmp.set_index("date")["value_cm"]
+    return lookup
+
+
+def summarize_snotel_results(
+    results: Dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    Summarize fetched SNOTEL result tables by station.
+
+    Parameters
+    ----------
+    results : Dict[str, pd.DataFrame]
+        Mapping of station name to SNOTEL result table returned by
+        fetch_snotel_timeseries().
+
+    Returns
+    -------
+    pd.DataFrame
+        Table with one row per station containing row count, date range, and
+        whether temperature is available.
+    """
+    rows = []
+    for station_name, df in results.items():
+        rows.append(
+            {
+                "station": station_name,
+                "rows": len(df),
+                "start": (
+                    pd.to_datetime(df["date_time_utc"]).min()
+                    if not df.empty
+                    else pd.NaT
+                ),
+                "end": (
+                    pd.to_datetime(df["date_time_utc"]).max()
+                    if not df.empty
+                    else pd.NaT
+                ),
+                "has_temperature": "temp_c" in df.columns,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["station", "rows", "start", "end", "has_temperature"]
+        )
+
+    return pd.DataFrame(rows).sort_values("station").reset_index(drop=True)
+
+
+def snotel_site_table_from_results(
+    results: Dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    Extract station coordinates and record counts from cached SNOTEL results.
+
+    Parameters
+    ----------
+    results : Dict[str, pd.DataFrame]
+        Mapping of station name to SNOTEL result table returned by
+        fetch_snotel_timeseries().
+
+    Returns
+    -------
+    pd.DataFrame
+        Table with columns site_name, latitude, longitude, and records.
+        Stations without a site_loc geometry are omitted.
+    """
+    rows = []
+    for site_name, df in results.items():
+        if df.empty or "site_loc" not in df.columns:
+            continue
+        point = df["site_loc"].iloc[0]
+        if point is None:
+            continue
+        rows.append(
+            {
+                "site_name": site_name,
+                "latitude": point.y,
+                "longitude": point.x,
+                "records": len(df),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["site_name", "latitude", "longitude", "records"]
+        )
+
+    return pd.DataFrame(rows).sort_values("site_name").reset_index(drop=True)
+
+
 def _iter_date_chunks(
     start_date: str, end_date: str, chunk_days: int
 ) -> list[tuple[str, str]]:
