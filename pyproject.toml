@@ -7,7 +7,7 @@ name = "snowsar"
 version = "0.1.0"
 description = "Snow Water Equivalent estimation using InSAR (SNOTEL, HyP3, MintPy, NISAR)."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Emre Havazli" }]
 dependencies = [
