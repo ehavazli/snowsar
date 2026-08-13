@@ -647,9 +647,9 @@ def compare_station_windows(
                 corrected = row["insar_delta_swe_cm_raw"]
                 if np.isfinite(corrected) and np.isfinite(bias_cm):
                     corrected = corrected - bias_cm
-                if (
+                if not (
                     np.isfinite(row["coherence"])
-                    and row["coherence"] < coherence_threshold
+                    and row["coherence"] >= coherence_threshold
                 ):
                     corrected = np.nan
                 row["bias_cm"] = bias_cm

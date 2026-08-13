@@ -2348,8 +2348,8 @@ def _approx_degree_spacing_meters(
     meters_per_deg_lat = 111132.92
     meters_per_deg_lon = 111319.49 * np.cos(np.deg2rad(lat0))
 
-    dx_m = abs(dx_deg) * meters_per_deg_lon
-    dy_m = abs(dy_deg) * meters_per_deg_lat
+    dx_m = dx_deg * meters_per_deg_lon
+    dy_m = dy_deg * meters_per_deg_lat
     return dx_m, dy_m
 
 
@@ -2367,7 +2367,7 @@ def _surface_normal_enu_from_dem(
         )
     else:
         _, dx, dy = _grid_bounds_from_xy(xcoord, ycoord)
-        dx_m, dy_m = abs(float(dx)), abs(float(dy))
+        dx_m, dy_m = float(dx), float(dy)
 
     dz_dy, dz_dx = np.gradient(dem_m.astype(np.float64), dy_m, dx_m)
 

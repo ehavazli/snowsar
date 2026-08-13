@@ -9,7 +9,12 @@ from snowsar.utils.lidar_utils import (
     cumulative_sum_through_date,
     extract_start_date_str,
 )
-from snowsar.utils.nisar_utils import _read_geogrid_coords, h5_get, resolve_h5_path
+from snowsar.utils.nisar_utils import (
+    _read_geogrid_coords,
+    _surface_normal_enu_from_dem,
+    h5_get,
+    resolve_h5_path,
+)
 
 
 def test_resolve_h5_path_accepts_leading_slash_variants(tmp_path):
@@ -124,3 +129,28 @@ def test_cumulative_sum_through_date_rejects_bad_date_format():
 
     with pytest.raises(ValueError, match="Expected YYYYMMDD format"):
         cumulative_sum_through_date(stack, ["2024-01-01"], "20240101")
+
+
+def test_surface_normal_enu_from_dem_matches_analytic_slope_on_north_up_grid():
+    # North-up grid: ycoord descending (row 0 = north edge, row index increases southward).
+    ycoord = np.array([100.0, 90.0, 80.0, 70.0, 60.0])
+    xcoord = np.array([0.0, 10.0, 20.0, 30.0, 40.0])
+    y_2d, x_2d = np.meshgrid(ycoord, xcoord, indexing="ij")
+
+    # Elevation rises 1 m per meter of northing, flat in east: normal tilts toward -N.
+    dem_ns = y_2d.copy()
+    n_e, n_n, n_u = _surface_normal_enu_from_dem(
+        dem_ns, xcoord=xcoord, ycoord=ycoord, epsg=32612
+    )
+    assert n_e[2, 2] == pytest.approx(0.0, abs=1e-6)
+    assert n_n[2, 2] == pytest.approx(-1.0 / np.sqrt(2), abs=1e-6)
+    assert n_u[2, 2] == pytest.approx(1.0 / np.sqrt(2), abs=1e-6)
+
+    # Elevation rises 1 m per meter of easting, flat in north: normal tilts toward -E.
+    dem_ew = x_2d.copy()
+    n_e2, n_n2, n_u2 = _surface_normal_enu_from_dem(
+        dem_ew, xcoord=xcoord, ycoord=ycoord, epsg=32612
+    )
+    assert n_e2[2, 2] == pytest.approx(-1.0 / np.sqrt(2), abs=1e-6)
+    assert n_n2[2, 2] == pytest.approx(0.0, abs=1e-6)
+    assert n_u2[2, 2] == pytest.approx(1.0 / np.sqrt(2), abs=1e-6)
