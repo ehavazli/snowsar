@@ -1296,6 +1296,19 @@ def _open_with_earthaccess(
             "Install with: conda install -c conda-forge earthaccess h5py"
         ) from e
 
+    class _StreamBackedH5File(h5py.File):
+        """h5py.File that also closes its backing earthaccess stream on close()."""
+
+        def __init__(self, stream: Any, **kwargs: Any) -> None:
+            super().__init__(stream, **kwargs)
+            self._nisar_stream = stream
+
+        def close(self) -> None:
+            try:
+                super().close()
+            finally:
+                self._nisar_stream.close()
+
     if not _earthaccess_authenticated(earthaccess):
         setup_earthaccess_auth()
 
@@ -1308,7 +1321,12 @@ def _open_with_earthaccess(
         )
         if not opened:
             raise ValueError("earthaccess.open() returned no file handles.")
-        return h5py.File(opened[0], mode=mode)
+        stream = opened[0]
+        try:
+            return _StreamBackedH5File(stream, mode=mode)
+        except Exception:
+            stream.close()
+            raise
     except Exception as e:
         raise RuntimeError(
             "Failed to stream the requested NISAR granule via earthaccess. "
