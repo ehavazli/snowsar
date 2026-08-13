@@ -8,4 +8,6 @@ dependencies:
   - pandas
   - h5py
   - scipy
+  - shapely
+  - geopandas
   - pytest
