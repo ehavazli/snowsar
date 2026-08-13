@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 import h5py
 import numpy as np
 
+from .mintpy_utils import mintpy_crs_from_attrs
+
 
 class _MissingOptionalDependency:
     def __init__(self, package: str):
@@ -122,6 +124,17 @@ def _decode_attr(value: Any) -> Any:
     return value
 
 
+def _mintpy_grid_crs_from_attrs(attrs: Dict[str, Any]) -> CRS:
+    """Infer a MintPy grid's CRS from its attrs, raising if it cannot be determined."""
+    pyproj_crs = mintpy_crs_from_attrs(attrs)
+    if pyproj_crs is None:
+        raise ValueError(
+            "Could not infer MintPy grid CRS from attributes. "
+            "Expected an EPSG attribute or degree-based X/Y units."
+        )
+    return CRS.from_user_input(pyproj_crs)
+
+
 def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
     """
     Read MintPy geocoded grid definition from HDF5 file.
@@ -143,11 +156,14 @@ def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
     Raises
     ------
     ValueError
-        If file lacks required grid attributes/datasets, or if lat/lon grid is not regular
+        If file lacks required grid attributes/datasets, if lat/lon grid is not
+        regular, or if the CRS cannot be inferred from attrs (X/Y-attrs branch only)
 
     Notes
     -----
-    Assumes EPSG:4326 (WGS84 lat/lon) coordinate reference system.
+    The latitude/longitude dataset fallback is always geographic (EPSG:4326).
+    The X_FIRST/Y_FIRST attrs branch infers the CRS from an EPSG attribute or
+    degree-based X/Y units, and supports both geographic and projected grids.
     """
     mintpy_timeseries_path = Path(mintpy_timeseries_path)
 
@@ -163,6 +179,7 @@ def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
             y_step = float(attrs["Y_STEP"])
             length = int(attrs["LENGTH"])
             width = int(attrs["WIDTH"])
+            crs = _mintpy_grid_crs_from_attrs(attrs)
         elif "latitude" in h5 and "longitude" in h5:
             lat = h5["latitude"][()]
             lon = h5["longitude"][()]
@@ -184,6 +201,7 @@ def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
             lat_regular = np.allclose(np.diff(lat, axis=0), y_step, atol=tol, equal_nan=True)
             if not (lon_regular and lat_regular):
                 raise ValueError("MintPy latitude/longitude grid is not regular enough for affine output.")
+            crs = CRS.from_epsg(4326)
         else:
             raise ValueError(
                 "MintPy file must provide X/Y grid attributes or latitude/longitude datasets."
@@ -198,7 +216,7 @@ def get_mintpy_grid(mintpy_timeseries_path: str | Path) -> MintPyGrid:
         y_first=y_first,
         y_step=y_step,
         transform=transform,
-        crs=CRS.from_epsg(4326),
+        crs=crs,
         attrs=attrs,
     )
 
@@ -220,11 +238,13 @@ def get_geocoded_hdf5_grid(h5_path: str | Path) -> MintPyGrid:
     Raises
     ------
     ValueError
-        If required grid attributes (X_FIRST, X_STEP, Y_FIRST, Y_STEP, LENGTH, WIDTH) are missing
+        If required grid attributes (X_FIRST, X_STEP, Y_FIRST, Y_STEP, LENGTH, WIDTH)
+        are missing, or if the CRS cannot be inferred from attrs
 
     Notes
     -----
-    Assumes EPSG:4326 (WGS84 lat/lon) coordinate reference system.
+    Infers the CRS from an EPSG attribute or degree-based X/Y units; supports
+    both geographic and projected grids.
     """
     h5_path = Path(h5_path)
     with h5py.File(h5_path, "r") as h5:
@@ -239,6 +259,7 @@ def get_geocoded_hdf5_grid(h5_path: str | Path) -> MintPyGrid:
     y_step = float(attrs["Y_STEP"])
     length = int(attrs["LENGTH"])
     width = int(attrs["WIDTH"])
+    crs = _mintpy_grid_crs_from_attrs(attrs)
     transform = Affine(x_step, 0.0, x_first, 0.0, y_step, y_first)
     return MintPyGrid(
         length=length,
@@ -248,7 +269,7 @@ def get_geocoded_hdf5_grid(h5_path: str | Path) -> MintPyGrid:
         y_first=y_first,
         y_step=y_step,
         transform=transform,
-        crs=CRS.from_epsg(4326),
+        crs=crs,
         attrs=attrs,
     )
 
