@@ -390,7 +390,7 @@ def test_extract_gunw_layers_to_geotiff_bbox_streamed_handles_cube_layers(
         Path(dem_out).write_bytes(b"dem")
         return Path(dem_out)
 
-    def fake_prepare_dem(*, x_out, y_out, out_epsg, **kwargs):
+    def fake_prepare_dem(dem_path, *, x_out, y_out, out_epsg, **kwargs):
         dem_calls.append(("prepare", tuple(x_out), tuple(y_out), out_epsg))
         return np.ones((len(y_out), len(x_out)), dtype=np.float32)
 
